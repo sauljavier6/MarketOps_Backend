@@ -8,10 +8,9 @@ const SITE_ID = "MLM";
 
 type Trend = { keyword: string; url?: string };
 type CatalogSearchResult = { id?: string; name?: string; status?: string; domain_id?: string };
-type CatalogProductDetail = { id?: string; name?: string; status?: string; domain_id?: string; sold_quantity?: number; children_ids?: string[]; buy_box_winner?: { item_id?: string; seller_id?: number; price?: number; currency_id?: string; available_quantity?: number } | null };
+type CatalogProductDetail = { id?: string; name?: string; status?: string; domain_id?: string; sold_quantity?: number; children_ids?: string[]; buy_box_winner?: { item_id?: string; seller_id?: number; price?: number; currency_id?: string; available_quantity?: number; sold_quantity?: number } | null };
 type CatalogItem = { item_id?: string; seller_id?: number; price?: number; currency_id?: string; available_quantity?: number; condition?: string };
 type CatalogItemsResponse = { paging?: { total?: number; offset?: number; limit?: number }; results?: CatalogItem[] };
-type SalePrice = { price_id?: string; amount?: number; regular_amount?: number | null; currency_id?: string; reference_date?: string };
 
 function buildMercadoLibreError(path: string, status: number, body: any) {
   const details = [`Mercado Libre ${status}`, `path=${path}`, body?.error ? `error=${body.error}` : null, body?.message ? `message=${body.message}` : null, body?.code ? `code=${body.code}` : null].filter(Boolean).join(" | ");
@@ -26,6 +25,19 @@ async function authorizedGet<T>(path: string): Promise<T> {
   if (!response.ok) {
     console.error("[MELI RESEARCH] request failed", { path, status: response.status, error: body?.error || null, message: body?.message || null, code: body?.code || null, cause: body?.cause || [] });
     throw buildMercadoLibreError(path, response.status, body);
+  }
+  return body as T;
+}
+
+async function authorizedGetOptional<T>(path: string): Promise<T | null> {
+  const account = await getActiveAccount();
+  const token = await getValidAccessToken(account);
+  const response = await fetch(`${API_BASE}${path}`, { headers: { Authorization: `Bearer ${token}`, accept: "application/json" } });
+  const body = await response.json().catch(() => ({})) as any;
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    console.warn("[MELI RESEARCH] optional request unavailable", { path, status: response.status, error: body?.error || null, message: body?.message || null, code: body?.code || null });
+    return null;
   }
   return body as T;
 }
@@ -55,11 +67,7 @@ export async function getCatalogProduct(productId: string) {
 }
 
 export async function getCatalogProductItems(productId: string) {
-  return authorizedGet<CatalogItemsResponse>(`/products/${encodeURIComponent(productId)}/items`);
-}
-
-export async function getItemSalePrice(itemId: string) {
-  return authorizedGet<SalePrice>(`/items/${encodeURIComponent(itemId)}/sale_price?context=channel_marketplace`);
+  return authorizedGetOptional<CatalogItemsResponse>(`/products/${encodeURIComponent(productId)}/items`);
 }
 
 async function resolveTerminalProducts(detail: CatalogProductDetail, depth = 0): Promise<CatalogProductDetail[]> {
@@ -118,51 +126,49 @@ export async function analyzeKeyword(keyword: string, trendRank: number, totalTr
   const rootDetails = (await Promise.all(catalog.results.slice(0, 8).map(async (product) => product.id ? getCatalogProduct(product.id).catch(() => null) : null))).filter(Boolean) as CatalogProductDetail[];
   const terminalDetails = (await Promise.all(rootDetails.map((detail) => resolveTerminalProducts(detail)))).flat().filter((detail) => detail.id).slice(0, 24);
 
+  const winnerPriceEvidence = terminalDetails.map((detail) => {
+    const winner = detail.buy_box_winner;
+    const amount = Number(winner?.price);
+    return winner?.item_id && Number.isFinite(amount) && amount > 0 && winner?.currency_id === "MXN"
+      ? { itemId: winner.item_id, productId: detail.id!, sellerId: winner.seller_id ?? null, amount, source: "PRODUCT_BUY_BOX" }
+      : null;
+  }).filter(Boolean) as Array<{ itemId: string; productId: string; sellerId: number | null; amount: number; source: string }>;
+
   const pdpResponses = (await Promise.all(terminalDetails.slice(0, 16).map(async (detail) => {
-    try {
-      const response = await getCatalogProductItems(detail.id!);
-      return { productId: detail.id!, response };
-    } catch (error: any) {
-      console.warn("[MELI RESEARCH] product items unavailable", { productId: detail.id, message: error?.message || String(error) });
-      return null;
-    }
+    const response = await getCatalogProductItems(detail.id!);
+    return response ? { productId: detail.id!, response } : null;
   }))).filter(Boolean) as Array<{ productId: string; response: CatalogItemsResponse }>;
 
   const catalogItems = pdpResponses.flatMap(({ productId, response }) => (response.results || []).map((item) => ({ ...item, productId })));
   const uniqueItems = [...new Map(catalogItems.filter((item) => item.item_id).map((item) => [item.item_id!, item])).values()];
   const totalCompetingListings = pdpResponses.reduce((sum, row) => sum + Number(row.response.paging?.total || row.response.results?.length || 0), 0);
 
-  const salePrices = (await Promise.all(uniqueItems.slice(0, 20).map(async (item) => {
-    const fallbackAmount = Number(item.price);
-    try {
-      const price = await getItemSalePrice(item.item_id!);
-      const amount = Number(price.amount);
-      if (Number.isFinite(amount) && amount > 0 && price.currency_id === "MXN") {
-        return { itemId: item.item_id!, productId: item.productId, sellerId: item.seller_id ?? null, amount, regularAmount: price.regular_amount ?? null, referenceDate: price.reference_date ?? null, source: "SALE_PRICE_API" };
-      }
-    } catch (error: any) {
-      console.warn("[MELI RESEARCH] sale price unavailable", { itemId: item.item_id, message: error?.message || String(error) });
-    }
-    return Number.isFinite(fallbackAmount) && fallbackAmount > 0 && item.currency_id === "MXN"
-      ? { itemId: item.item_id!, productId: item.productId, sellerId: item.seller_id ?? null, amount: fallbackAmount, regularAmount: null, referenceDate: null, source: "PDP_ITEMS_API" }
+  const pdpPriceEvidence = uniqueItems.map((item) => {
+    const amount = Number(item.price);
+    return item.item_id && Number.isFinite(amount) && amount > 0 && item.currency_id === "MXN"
+      ? { itemId: item.item_id, productId: item.productId, sellerId: item.seller_id ?? null, amount, source: "PDP_ITEMS_API" }
       : null;
-  }))).filter(Boolean) as Array<{ itemId: string; productId: string; sellerId: number | null; amount: number; regularAmount: number | null; referenceDate: string | null; source: string }>;
+  }).filter(Boolean) as Array<{ itemId: string; productId: string; sellerId: number | null; amount: number; source: string }>;
 
-  const officialPrices = removePriceOutliers(salePrices.map((row) => row.amount));
-  const sellerIds = new Set(uniqueItems.map((row) => row.seller_id).filter(Boolean)).size;
+  const combinedEvidence = [...winnerPriceEvidence, ...pdpPriceEvidence];
+  const dedupedEvidence = [...new Map(combinedEvidence.map((row) => [row.itemId, row])).values()];
+  const officialPrices = removePriceOutliers(dedupedEvidence.map((row) => row.amount));
+  const sellerIds = new Set(dedupedEvidence.map((row) => row.sellerId).filter(Boolean)).size;
   const catalogMatchCount = Number(catalog.paging?.total || catalog.results.length || 0);
   const rankRatio = totalTrends > 1 ? trendRank / (totalTrends - 1) : 0;
   const demandScore = Math.round(95 - (rankRatio * 40));
-  const listingBreadth = Math.min(100, Math.log10(Math.max(totalCompetingListings, 1)) * 38);
+  const listingSignal = Math.max(totalCompetingListings, dedupedEvidence.length);
+  const listingBreadth = Math.min(100, Math.log10(Math.max(listingSignal, 1)) * 38);
   const sellerDiversity = Math.min(100, sellerIds * 8);
   const competitionScore = Math.round((listingBreadth * 0.75) + (sellerDiversity * 0.25));
   const estimatedSalePrice = officialPrices.length ? Number(median(officialPrices).toFixed(2)) : null;
-  const salePriceApiCount = salePrices.filter((row) => row.source === "SALE_PRICE_API").length;
-  const evidenceConfidence = officialPrices.length >= 8 ? 95 : officialPrices.length >= 5 ? 90 : officialPrices.length >= 3 ? 82 : officialPrices.length >= 2 ? 72 : officialPrices.length === 1 ? 58 : totalCompetingListings > 0 ? 40 : catalogMatchCount > 0 ? 30 : 20;
-  const missingReason = estimatedSalePrice ? null : totalCompetingListings > 0 ? "PDP_LISTINGS_WITHOUT_PRICE" : terminalDetails.length ? "NO_PDP_LISTINGS" : catalogMatchCount > 0 ? "NO_TERMINAL_CATALOG_PRODUCT" : "NO_CATALOG_MATCH";
+  const buyBoxPriceCount = winnerPriceEvidence.length;
+  const pdpItemPriceCount = pdpPriceEvidence.length;
+  const evidenceConfidence = officialPrices.length >= 8 ? 95 : officialPrices.length >= 5 ? 90 : officialPrices.length >= 3 ? 82 : officialPrices.length >= 2 ? 72 : officialPrices.length === 1 ? 58 : catalogMatchCount > 0 ? 30 : 20;
+  const missingReason = estimatedSalePrice ? null : terminalDetails.length ? "NO_ACTIVE_MARKET_PRICE" : catalogMatchCount > 0 ? "NO_TERMINAL_CATALOG_PRODUCT" : "NO_CATALOG_MATCH";
 
   const evidence = {
-    evidenceVersion: 9,
+    evidenceVersion: 10,
     keyword,
     trendRank: trendRank + 1,
     trendsCount: totalTrends,
@@ -176,17 +182,17 @@ export async function analyzeKeyword(keyword: string, trendRank: number, totalTr
     uniqueItemsSampled: uniqueItems.length,
     uniqueSellerCount: sellerIds,
     salePriceSampleCount: officialPrices.length,
-    salePriceApiCount,
-    pdpItemPriceCount: salePrices.length - salePriceApiCount,
-    salePriceEvidence: salePrices.slice(0, 12),
-    priceSource: estimatedSalePrice ? (salePriceApiCount ? "MERCADOLIBRE_SALE_PRICE_API" : "MERCADOLIBRE_PDP_ITEMS_API") : null,
+    buyBoxPriceCount,
+    pdpItemPriceCount,
+    salePriceEvidence: dedupedEvidence.slice(0, 16),
+    priceSource: estimatedSalePrice ? (pdpItemPriceCount ? "MERCADOLIBRE_PDP_ITEMS_API" : "MERCADOLIBRE_PRODUCT_BUY_BOX") : null,
     priceRange: officialPrices.length ? { min: Math.min(...officialPrices), p25: percentile(officialPrices, 0.25), median: median(officialPrices), p75: percentile(officialPrices, 0.75), max: Math.max(...officialPrices), samples: officialPrices.length } : null,
     result: estimatedSalePrice ? "RESEARCHED_WITH_OFFICIAL_ML_MARKET_PRICES" : "DISCOVERED_INCOMPLETE",
     missingReason,
-    dataClassification: { estimatedSalePrice: estimatedSalePrice ? "REAL_DATA" : "UNAVAILABLE_DATA", competingListings: totalCompetingListings ? "REAL_DATA" : "UNAVAILABLE_DATA", demandScore: "INFERRED_DATA", competitionScore: "INFERRED_FROM_REAL_LISTINGS", supplierPrice: "PENDING_BRAVE_SUPPLIER_RESEARCH" },
+    dataClassification: { estimatedSalePrice: estimatedSalePrice ? "REAL_DATA" : "UNAVAILABLE_DATA", competingListings: listingSignal ? "REAL_DATA" : "UNAVAILABLE_DATA", demandScore: "INFERRED_DATA", competitionScore: "INFERRED_FROM_REAL_LISTINGS", supplierPrice: "PENDING_BRAVE_SUPPLIER_RESEARCH" },
   };
 
-  const snapshot = await MarketSnapshot.create({ Source: evidence.priceSource || "MERCADOLIBRE_CATALOG_API", Keyword: keyword, CategoryId: evidence.domainId, ActiveListings: totalCompetingListings, MinPrice: officialPrices.length ? Math.min(...officialPrices) : null, MedianPrice: estimatedSalePrice, MaxPrice: officialPrices.length ? Math.max(...officialPrices) : null, CompetitionScore: competitionScore, DemandScore: demandScore, RawSummary: evidence });
+  const snapshot = await MarketSnapshot.create({ Source: evidence.priceSource || "MERCADOLIBRE_CATALOG_API", Keyword: keyword, CategoryId: evidence.domainId, ActiveListings: listingSignal, MinPrice: officialPrices.length ? Math.min(...officialPrices) : null, MedianPrice: estimatedSalePrice, MaxPrice: officialPrices.length ? Math.max(...officialPrices) : null, CompetitionScore: competitionScore, DemandScore: demandScore, RawSummary: evidence });
   return { snapshot, predictedCategory: predicted, estimatedSalePrice, demandScore, competitionScore, evidenceConfidence, evidence };
 }
 
