@@ -15,6 +15,29 @@ type SearchResult = {
   category_id?: string;
 };
 
+function buildMercadoLibreError(path: string, status: number, body: any) {
+  const details = {
+    path,
+    status,
+    error: body?.error || null,
+    message: body?.message || null,
+    code: body?.code || body?.error_code || null,
+    cause: body?.cause || body?.causes || null,
+  };
+
+  console.error("[MELI RESEARCH] request failed", details);
+
+  const readable = [
+    `Mercado Libre ${status}`,
+    `path=${path}`,
+    details.error ? `error=${details.error}` : null,
+    details.code ? `code=${details.code}` : null,
+    details.message ? `message=${details.message}` : null,
+  ].filter(Boolean).join(" | ");
+
+  return new Error(readable);
+}
+
 async function authorizedGet<T>(path: string): Promise<T> {
   const account = await getActiveAccount();
   const token = await getValidAccessToken(account);
@@ -24,7 +47,7 @@ async function authorizedGet<T>(path: string): Promise<T> {
   });
 
   const body = await response.json().catch(() => ({})) as any;
-  if (!response.ok) throw new Error(body?.message || body?.error || `Mercado Libre ${response.status}`);
+  if (!response.ok) throw buildMercadoLibreError(path, response.status, body);
   return body as T;
 }
 
@@ -35,11 +58,12 @@ export async function getMexicoTrends(categoryId?: string): Promise<Trend[]> {
 
 export async function predictCategory(title: string) {
   const params = new URLSearchParams({ q: title, limit: "1" });
-  const response = await fetch(`${API_BASE}/sites/${SITE_ID}/domain_discovery/search?${params.toString()}`, {
+  const path = `/sites/${SITE_ID}/domain_discovery/search?${params.toString()}`;
+  const response = await fetch(`${API_BASE}${path}`, {
     headers: { accept: "application/json" },
   });
   const body = await response.json().catch(() => []) as any;
-  if (!response.ok) throw new Error(body?.message || `Category discovery ${response.status}`);
+  if (!response.ok) throw buildMercadoLibreError(path, response.status, body);
   return Array.isArray(body) ? body[0] || null : null;
 }
 
@@ -60,7 +84,10 @@ function median(values: number[]) {
 }
 
 export async function analyzeKeyword(keyword: string, trendRank: number, totalTrends: number) {
-  const predicted = await predictCategory(keyword).catch(() => null);
+  const predicted = await predictCategory(keyword).catch((error) => {
+    console.warn("[MELI RESEARCH] category prediction failed", { keyword, error: error instanceof Error ? error.message : String(error) });
+    return null;
+  });
   const search = await searchMarketplace(keyword, 30);
 
   const prices = search.results
