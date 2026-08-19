@@ -127,6 +127,7 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
 
     const summary = {
       trendsFound: trends.length,
+      trendsAnalyzed: selectedTrends.length,
       trendQueriesAnalyzed: selectedTrends.length,
       seasonalQueriesAnalyzed: seasonalSeeds.length,
       seasonalQueries: seasonalSeeds,
@@ -135,6 +136,7 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
       productsResearched: researched,
       validatedMarketCandidates: validatedCandidates.length,
       researchingCandidates: researching,
+      skippedWithoutReliableMarketPrice: researching,
       sourcingShortlist: shortlist.length,
       availableCapital,
       failed: results.filter((row) => row.status === "FAILED").length,
