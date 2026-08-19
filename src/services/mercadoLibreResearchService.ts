@@ -6,6 +6,8 @@ import { evaluateMexicoSeason } from "./seasonEngine";
 
 const API_BASE = "https://api.mercadolibre.com";
 const SITE_ID = "MLM";
+const MIN_MARKET_PRICE_SAMPLES = 3;
+const MIN_MARKET_CONFIDENCE = 70;
 
 type Trend = { keyword: string; url?: string };
 type CatalogSearchResult = { id?: string; name?: string; status?: string; domain_id?: string };
@@ -28,6 +30,9 @@ export type DiscoveredProduct = {
   title: string;
   domainId?: string | null;
   sourceTrend: string;
+  sourceType?: "MELI_TREND" | "SEASONAL_SEED";
+  sourceSeason?: string | null;
+  sourceScore?: number | null;
 };
 
 async function apiGet<T>(path: string, quietStatuses: number[] = []): Promise<T> {
@@ -152,7 +157,7 @@ function soldDemandScore(totalSold: number | null) {
   return Math.min(100, Math.round(Math.log10(Math.max(totalSold, 0) + 1) * 32));
 }
 
-export async function discoverConcreteProducts(keyword: string): Promise<DiscoveredProduct[]> {
+export async function discoverConcreteProducts(keyword: string, meta?: { sourceType?: "MELI_TREND" | "SEASONAL_SEED"; sourceSeason?: string | null; sourceScore?: number | null }): Promise<DiscoveredProduct[]> {
   const predicted = await predictCategory(keyword).catch(() => null);
   const catalog = await searchCatalogProducts(keyword, 12, predicted?.domain_id).catch(async () => searchCatalogProducts(keyword, 12).catch(() => ({ paging: {}, results: [] as CatalogSearchResult[] })));
   const seen = new Set<string>();
@@ -165,7 +170,7 @@ export async function discoverConcreteProducts(keyword: string): Promise<Discove
     const key = title.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    products.push({ productId: row.id, title, domainId: row.domain_id || null, sourceTrend: keyword });
+    products.push({ productId: row.id, title, domainId: row.domain_id || null, sourceTrend: keyword, sourceType: meta?.sourceType || "MELI_TREND", sourceSeason: meta?.sourceSeason || null, sourceScore: meta?.sourceScore ?? null });
     if (products.length >= 3) break;
   }
   return products;
@@ -178,7 +183,7 @@ export async function analyzeDiscoveredProduct(product: DiscoveredProduct, trend
   const winnerRows = terminalDetails.map((row) => row.buy_box_winner).filter(Boolean) as NonNullable<CatalogProductDetail["buy_box_winner"]>[];
   const winnerPrices = winnerRows.map((row) => Number(row.price)).filter((value) => Number.isFinite(value) && value > 0);
 
-  const pdpResponses = (await Promise.all(terminalDetails.slice(0, 10).map(async (detail) => ({ productId: detail.id!, response: await getCatalogProductItems(detail.id!) }))));
+  const pdpResponses = await Promise.all(terminalDetails.slice(0, 10).map(async (detail) => ({ productId: detail.id!, response: await getCatalogProductItems(detail.id!) })));
   const items = pdpResponses.flatMap(({ productId, response }) => (response.results || []).map((item) => ({ ...item, productId })));
   const uniqueItems = [...new Map(items.filter((item) => item.item_id).map((item) => [item.item_id!, item])).values()];
   const pdpPrices = uniqueItems.map((item) => Number(item.price)).filter((value) => Number.isFinite(value) && value > 0 && value < 1_000_000);
@@ -191,33 +196,45 @@ export async function analyzeDiscoveredProduct(product: DiscoveredProduct, trend
   const totalSold = soldValues.length ? soldValues.reduce((sum, value) => sum + value, 0) : null;
 
   const rankRatio = totalTrends > 1 ? trendRank / (totalTrends - 1) : 0;
-  const trendScore = Math.round(96 - rankRatio * 42);
+  const trendScore = product.sourceType === "SEASONAL_SEED" ? Number(product.sourceScore || 65) : Math.round(96 - rankRatio * 42);
   const soldScore = soldDemandScore(totalSold);
-  const demandScore = soldScore == null ? Math.round(trendScore * 0.78) : Math.round(trendScore * 0.62 + soldScore * 0.38);
+  const demandScore = soldScore == null ? Math.round(trendScore * 0.72) : Math.round(trendScore * 0.55 + soldScore * 0.45);
   const competitionScore = totalCompetingListings > 0
     ? Math.min(100, Math.round(Math.log10(totalCompetingListings + 1) * 35 + Math.min(30, sellerCount * 3)))
     : 50;
 
-  const season = evaluateMexicoSeason(`${product.sourceTrend} ${product.title}`);
+  const season = evaluateMexicoSeason(`${product.sourceSeason || ""} ${product.sourceTrend} ${product.title}`);
   let confidence = 20;
-  if (allPrices.length >= 5) confidence += 40;
+  if (allPrices.length >= 8) confidence += 45;
+  else if (allPrices.length >= 5) confidence += 40;
   else if (allPrices.length >= 3) confidence += 32;
-  else if (allPrices.length >= 2) confidence += 25;
-  else if (allPrices.length === 1) confidence += 15;
-  if (totalCompetingListings > 0) confidence += 12;
-  if (totalSold != null) confidence += 10;
-  if (root.id) confidence += 8;
+  else if (allPrices.length >= 2) confidence += 22;
+  else if (allPrices.length === 1) confidence += 12;
+  if (totalCompetingListings >= 3) confidence += 12;
+  else if (totalCompetingListings > 0) confidence += 6;
+  if (sellerCount >= 2) confidence += 8;
+  if (totalSold != null) confidence += 8;
+  if (root.id) confidence += 5;
   confidence = Math.min(95, confidence);
 
   const categoryId = root.category_id || (await predictCategory(product.title).catch(() => null))?.category_id || null;
   const fee = estimatedSalePrice ? await getListingFee(estimatedSalePrice, categoryId) : null;
   const marketScore = calculateMarketScore({ demandScore, competitionScore, seasonalScore: season.score, trendScore, confidenceScore: confidence });
-  const missingReason = !estimatedSalePrice ? "NO_VALIDATED_ML_MARKET_PRICE" : confidence < 55 ? "LOW_EVIDENCE_CONFIDENCE" : null;
+  const marketValidated = Boolean(estimatedSalePrice && allPrices.length >= MIN_MARKET_PRICE_SAMPLES && confidence >= MIN_MARKET_CONFIDENCE);
+  const missingReason = !estimatedSalePrice
+    ? "NO_VALIDATED_ML_MARKET_PRICE"
+    : allPrices.length < MIN_MARKET_PRICE_SAMPLES
+      ? "INSUFFICIENT_MARKET_PRICE_SAMPLES"
+      : confidence < MIN_MARKET_CONFIDENCE
+        ? "LOW_EVIDENCE_CONFIDENCE"
+        : null;
 
   const evidence = {
-    evidenceVersion: 10,
+    evidenceVersion: 11,
     sourceTrend: product.sourceTrend,
-    trendRank: trendRank + 1,
+    sourceType: product.sourceType || "MELI_TREND",
+    sourceSeason: product.sourceSeason || null,
+    trendRank: product.sourceType === "MELI_TREND" ? trendRank + 1 : null,
     catalogProductId: product.productId,
     domainId: root.domain_id || product.domainId || null,
     categoryId,
@@ -226,44 +243,34 @@ export async function analyzeDiscoveredProduct(product: DiscoveredProduct, trend
     uniqueSellerCount: sellerCount,
     soldQuantitySampleTotal: totalSold,
     marketPriceSamples: allPrices.length,
+    validationRules: { minMarketPriceSamples: MIN_MARKET_PRICE_SAMPLES, minConfidence: MIN_MARKET_CONFIDENCE },
     priceSource: allPrices.length ? "MERCADOLIBRE_CATALOG_WINNER_AND_PDP" : null,
     priceRange: allPrices.length ? { min: Math.min(...allPrices), p25: percentile(allPrices, 0.25), median: median(allPrices), p75: percentile(allPrices, 0.75), max: Math.max(...allPrices), samples: allPrices.length } : null,
     fee,
     season,
-    result: estimatedSalePrice && confidence >= 55 ? "MARKET_VALIDATED" : "RESEARCH_INCOMPLETE",
+    result: marketValidated ? "MARKET_VALIDATED" : "RESEARCH_INCOMPLETE",
     missingReason,
     dataClassification: {
       marketPrices: allPrices.length ? "REAL_DATA" : "UNAVAILABLE_DATA",
       competingListings: totalCompetingListings > 0 ? "REAL_DATA" : "UNAVAILABLE_DATA",
       soldQuantity: totalSold != null ? "REAL_DATA_PERIOD_UNSPECIFIED" : "UNAVAILABLE_DATA",
       listingFee: fee ? "REAL_DATA" : "UNAVAILABLE_DATA",
-      demandScore: "INFERRED_FROM_TREND_AND_SALES_SIGNAL",
+      demandScore: "INFERRED_FROM_DISCOVERY_AND_SALES_SIGNAL",
       competitionScore: totalCompetingListings > 0 ? "INFERRED_FROM_REAL_LISTINGS" : "NEUTRAL_DATA",
       seasonalScore: season.classification,
       supplierPrice: "PENDING_BRAVE_SUPPLIER_RESEARCH",
     },
   };
 
-  await MarketSnapshot.create({
-    Source: "MERCADOLIBRE_CATALOG_RESEARCH",
-    Keyword: product.title,
-    CategoryId: root.domain_id || product.domainId || null,
-    ActiveListings: totalCompetingListings,
-    MinPrice: allPrices.length ? Math.min(...allPrices) : null,
-    MedianPrice: estimatedSalePrice,
-    MaxPrice: allPrices.length ? Math.max(...allPrices) : null,
-    CompetitionScore: competitionScore,
-    DemandScore: demandScore,
-    RawSummary: evidence,
-  });
+  await MarketSnapshot.create({ Source: "MERCADOLIBRE_CATALOG_RESEARCH", Keyword: product.title, CategoryId: root.domain_id || product.domainId || null, ActiveListings: totalCompetingListings, MinPrice: allPrices.length ? Math.min(...allPrices) : null, MedianPrice: estimatedSalePrice, MaxPrice: allPrices.length ? Math.max(...allPrices) : null, CompetitionScore: competitionScore, DemandScore: demandScore, RawSummary: evidence });
 
-  return { product, estimatedSalePrice, demandScore, competitionScore, trendScore, seasonalScore: season.score, season, confidence, marketScore, fee, evidence };
+  return { product, estimatedSalePrice, demandScore, competitionScore, trendScore, seasonalScore: season.score, season, confidence, marketScore, fee, evidence, marketValidated };
 }
 
 export async function createCandidateFromDiscoveredProduct(product: DiscoveredProduct, rank: number, total: number) {
   const market = await analyzeDiscoveredProduct(product, rank, total);
-  if (!market.estimatedSalePrice || market.confidence < 55) {
-    return { candidate: null, research: { keyword: product.title, sourceTrend: product.sourceTrend, status: "SKIPPED", estimatedSalePrice: market.estimatedSalePrice, confidenceScore: market.confidence, marketScore: market.marketScore, result: market.evidence.result, missingReason: market.evidence.missingReason } };
+  if (!market.marketValidated) {
+    return { candidate: null, research: { keyword: product.title, sourceTrend: product.sourceTrend, sourceType: product.sourceType, sourceSeason: product.sourceSeason, status: "RESEARCHING", estimatedSalePrice: market.estimatedSalePrice, marketPriceSamples: market.evidence.marketPriceSamples, confidenceScore: market.confidence, marketScore: market.marketScore, result: market.evidence.result, missingReason: market.evidence.missingReason } };
   }
 
   const status = getCandidateStatus(market.marketScore, market.confidence, true);
@@ -286,7 +293,7 @@ export async function createCandidateFromDiscoveredProduct(product: DiscoveredPr
 
   const existing = await RadarCandidate.findOne({ where: { Title: product.title } });
   const candidate = existing ? await existing.update(payload) : await RadarCandidate.create(payload);
-  return { candidate, research: { keyword: product.title, sourceTrend: product.sourceTrend, status, estimatedSalePrice: market.estimatedSalePrice, confidenceScore: market.confidence, marketScore: market.marketScore, result: market.evidence.result, missingReason: null } };
+  return { candidate, research: { keyword: product.title, sourceTrend: product.sourceTrend, sourceType: product.sourceType, sourceSeason: product.sourceSeason, status, estimatedSalePrice: market.estimatedSalePrice, marketPriceSamples: market.evidence.marketPriceSamples, confidenceScore: market.confidence, marketScore: market.marketScore, result: market.evidence.result, missingReason: null } };
 }
 
 export async function createCandidateFromTrend(keyword: string, rank: number, total: number) {
