@@ -12,7 +12,8 @@ const STRATEGY = {
   seasonalWeight: 0.70,
   evergreenWeight: 0.30,
   horizonDays: 120,
-  productsPerSeason: 10,
+  maxSeasons: 5,
+  productsPerSeason: 5,
   evergreenProducts: 10,
   sourcingCandidates: 6,
   maxUnitCostPercentOfCapital: 0.30,
@@ -53,12 +54,15 @@ function timingPriority(stage: string) {
 }
 
 async function persistCandidate(product: any, market: any, opportunity: CommercialOpportunity | null, trend: any, sourceStrategy: "SEASONAL" | "EVERGREEN") {
+  const previous = await RadarCandidate.findOne({ where: { Title: product.title } });
+  const previousEvidence: any = previous?.Evidence || {};
   const evidence: any = market.evidence || {};
   evidence.sourceStrategy = sourceStrategy;
   evidence.commercialOpportunity = opportunity;
   evidence.trendValidation = trend;
   evidence.stage = market.estimatedSalePrice ? "MARKET_VALIDATED" : "MARKET_RESEARCH";
   evidence.decision = "RESEARCH";
+  if (previousEvidence.sellingCosts) evidence.sellingCosts = previousEvidence.sellingCosts;
   evidence.scoring = {
     SeasonScore: opportunity ? timingPriority(opportunity.stage) : 50,
     TimingScore: opportunity ? timingPriority(opportunity.stage) : 70,
@@ -80,8 +84,8 @@ async function persistCandidate(product: any, market: any, opportunity: Commerci
     Season: opportunity?.name || null,
     EstimatedSalePrice: market.estimatedSalePrice,
     EstimatedMarketplaceFee: Number(market.fee?.saleFeeAmount || 0),
-    EstimatedShippingCost: 0,
-    PackagingCost: 0,
+    EstimatedShippingCost: previousEvidence.sellingCosts?.marketplaceShipping ?? 0,
+    PackagingCost: previousEvidence.sellingCosts?.packagingCost ?? 0,
     DemandScore: market.demandScore,
     CompetitionScore: market.competitionScore,
     SeasonalScore: opportunity ? timingPriority(opportunity.stage) : 50,
@@ -92,8 +96,7 @@ async function persistCandidate(product: any, market: any, opportunity: Commerci
     Evidence: evidence,
   };
 
-  const existing = await RadarCandidate.findOne({ where: { Title: product.title } });
-  return existing ? existing.update(payload) : RadarCandidate.create(payload);
+  return previous ? previous.update(payload) : RadarCandidate.create(payload);
 }
 
 async function discoverSeasonProducts(opportunity: CommercialOpportunity, trends: Array<{ keyword: string }>, researchedIds: Set<string>, results: any[]) {
@@ -168,9 +171,10 @@ async function enrichCandidate(candidate: RadarCandidate, availableCapital: numb
   const timing = calculateTiming(opportunity, supplierLeadTime, STRATEGY.preparationDays, STRATEGY.safetyBufferDays);
   const preliminaryProfit = supplierPrice == null ? null : Number((salePrice - supplierPrice - Number(candidate.EstimatedMarketplaceFee || 0)).toFixed(2));
   const preliminaryMargin = preliminaryProfit == null ? null : Number((preliminaryProfit / salePrice * 100).toFixed(2));
+  const sellingCosts = evidence.sellingCosts || null;
 
-  const economics = calculateUnitEconomics({ salePrice, supplierPrice: verifiedOffer ? supplierPrice : null, purchaseShippingPerUnit: verifiedOffer ? Number(verifiedOffer.ShippingCost || 0) / Math.max(1, Number(verifiedOffer.MOQ || 1)) : null, otherPurchaseCostsPerUnit: verifiedOffer ? Number(verifiedOffer.ImportCost || 0) / Math.max(1, Number(verifiedOffer.MOQ || 1)) : null, mercadoLibreFee: Number(candidate.EstimatedMarketplaceFee || 0), mercadoLibreShipping: null, packagingCost: null, otherSellingCosts: null });
-  const decision = evaluateInvestment({ opportunity, marketScore: Number(candidate.MarketScore || 0), demandScore: Number(candidate.DemandScore || 0), competitionScore: Number(candidate.CompetitionScore || 0), dataConfidence: Number(candidate.ConfidenceScore || 0), supplierScore, timingScore: timing.timingScore, timingStatus: timing.timingStatus, economics, capital: availableCapital, supplierVerified, maxUnitCostPercentOfCapital: STRATEGY.maxUnitCostPercentOfCapital, minimumExpectedMargin: STRATEGY.minimumExpectedMargin, minimumROI: STRATEGY.minimumROI });
+  const economics = calculateUnitEconomics({ salePrice, supplierPrice: verifiedOffer ? supplierPrice : null, purchaseShippingPerUnit: verifiedOffer ? Number(verifiedOffer.ShippingCost || 0) / Math.max(1, Number(verifiedOffer.MOQ || 1)) : null, otherPurchaseCostsPerUnit: verifiedOffer ? Number(verifiedOffer.ImportCost || 0) / Math.max(1, Number(verifiedOffer.MOQ || 1)) : null, mercadoLibreFee: Number(candidate.EstimatedMarketplaceFee || 0), mercadoLibreShipping: sellingCosts?.verified ? Number(sellingCosts.marketplaceShipping || 0) : null, packagingCost: sellingCosts?.verified ? Number(sellingCosts.packagingCost || 0) : null, otherSellingCosts: sellingCosts?.verified ? Number(sellingCosts.otherSellingCosts || 0) : null });
+  const decision = evaluateInvestment({ opportunity, marketScore: Number(candidate.MarketScore || 0), demandScore: Number(candidate.DemandScore || 0), competitionScore: Number(candidate.CompetitionScore || 0), dataConfidence: Number(candidate.ConfidenceScore || 0), supplierScore, timingScore: timing.timingScore, timingStatus: timing.timingStatus, economics, capital: availableCapital, supplierVerified, marketPriceVerified: Boolean(salePrice), maxUnitCostPercentOfCapital: STRATEGY.maxUnitCostPercentOfCapital, minimumExpectedMargin: STRATEGY.minimumExpectedMargin, minimumROI: STRATEGY.minimumROI });
 
   const maxProductBudget = availableCapital * STRATEGY.maxAllocationPerProduct;
   const recommendedQuantity = economics.ready && economics.landedCost ? Math.max(0, Math.floor(maxProductBudget / economics.landedCost)) : 0;
@@ -178,7 +182,7 @@ async function enrichCandidate(candidate: RadarCandidate, availableCapital: numb
 
   evidence.sourcing = { provider: "BRAVE_SEARCH", leadsFound: brave.leads.length, estimatedPurchasePrice, supplierVerified, verifiedSupplier: verifiedOffer ? { name: verifiedOffer.SupplierName, unitPrice: Number(verifiedOffer.UnitPrice), moq: Number(verifiedOffer.MOQ), shippingCost: Number(verifiedOffer.ShippingCost), importCost: Number(verifiedOffer.ImportCost), deliveryDays: verifiedOffer.DeliveryDays, reliabilityScore: Number(verifiedOffer.ReliabilityScore) } : null, supplierLeads: plausible.slice(0, 5).map((row: any) => ({ name: row.lead.Name, domain: row.lead.Domain, url: row.lead.Url, leadScore: row.lead.LeadScore, priceHint: row.price })) };
   evidence.timing = timing;
-  evidence.economics = { ...economics, preliminaryProfitBeforeUnknownSellingCosts: preliminaryProfit, preliminaryMarginBeforeUnknownSellingCosts: preliminaryMargin, note: economics.ready ? null : "No se inventan envío ML, empaque ni otros costos desconocidos; por eso BUY queda bloqueado hasta completar costos." };
+  evidence.economics = { ...economics, preliminaryProfitBeforeUnknownSellingCosts: preliminaryProfit, preliminaryMarginBeforeUnknownSellingCosts: preliminaryMargin, note: economics.ready ? null : "No se inventan envío ML, empaque ni otros costos desconocidos; BUY queda bloqueado hasta completar costos verificados." };
   evidence.scoring = { ...(evidence.scoring || {}), SupplierScore: supplierScore, TimingScore: timing.timingScore, MarginScore: decision.marginScore, CapitalFitScore: decision.capitalFitScore, RiskScore: decision.riskScore, DataConfidence: Number(candidate.ConfidenceScore || 0), InvestmentScore: decision.investmentScore };
   evidence.qualityGates = decision.qualityGates;
   evidence.decision = decision.decision;
@@ -199,7 +203,7 @@ export async function runMercadoLibreDiscovery(categoryId?: string, _maxTrends =
     const availableCapital = capitalAccount ? Number(capitalAccount.CurrentCash || 0) : 0;
     const trends = await getMexicoTrends(categoryId);
     const calendar = getCommercialCalendar(now, STRATEGY.horizonDays);
-    const seasonPlan = getSeasonDiscoveryPlan(now, { horizonDays: STRATEGY.horizonDays, maxSeasons: 5, hypothesesPerSeason: 8 });
+    const seasonPlan = getSeasonDiscoveryPlan(now, { horizonDays: STRATEGY.horizonDays, maxSeasons: STRATEGY.maxSeasons, hypothesesPerSeason: 8 });
     const researchedIds = new Set<string>();
     const results: any[] = [];
     const allCandidates: RadarCandidate[] = [];
@@ -224,9 +228,11 @@ export async function runMercadoLibreDiscovery(categoryId?: string, _maxTrends =
     const refreshed = await RadarCandidate.findAll({ where: { Status: { [Op.notIn]: ["ARCHIVED"] } } });
     const ranked = refreshed.sort((a, b) => Number((b.Evidence as any)?.scoring?.InvestmentScore || b.MarketScore || 0) - Number((a.Evidence as any)?.scoring?.InvestmentScore || a.MarketScore || 0));
     const buyCount = ranked.filter((candidate) => (candidate.Evidence as any)?.decision === "BUY").length;
+    const targetSeasonal = STRATEGY.maxSeasons * STRATEGY.productsPerSeason;
+    const targetTotal = targetSeasonal + STRATEGY.evergreenProducts;
 
     const summary = {
-      strategy: STRATEGY,
+      strategy: { ...STRATEGY, targetSeasonalProducts: targetSeasonal, targetEvergreenProducts: STRATEGY.evergreenProducts, targetSeasonalPct: Number((targetSeasonal / targetTotal * 100).toFixed(1)), targetEvergreenPct: Number((STRATEGY.evergreenProducts / targetTotal * 100).toFixed(1)) },
       runDate: now.toISOString(),
       availableCapital,
       commercialCalendar: calendar,
