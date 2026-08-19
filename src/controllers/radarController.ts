@@ -5,6 +5,7 @@ import InvestmentRecommendation from "../models/InvestmentRecommendation";
 import RadarCandidate from "../models/RadarCandidate";
 import SupplierOffer from "../models/SupplierOffer";
 import { finalizeCandidateDecision } from "../services/candidateDecisionService";
+import { researchCandidateDeep } from "../services/candidateDeepResearchService";
 import { buildInvestmentRecommendation } from "../services/investmentEngine";
 import { calculateMarketScore, getCandidateStatus } from "../services/marketRadarService";
 
@@ -25,6 +26,16 @@ export async function getRadarCandidates(_req: Request, res: Response) {
     return Number((b.Evidence as any)?.scoring?.InvestmentScore || b.MarketScore || 0) - Number((a.Evidence as any)?.scoring?.InvestmentScore || a.MarketScore || 0) || Number(b.ConfidenceScore || 0) - Number(a.ConfidenceScore || 0);
   });
   res.json(rows.slice(0, 30));
+}
+
+export async function deepResearchCandidate(req: Request, res: Response) {
+  try {
+    const candidateId = Number(req.params.candidateId);
+    if (!Number.isFinite(candidateId) || candidateId <= 0) return res.status(400).json({ error: "candidateId must be valid" });
+    return res.json(await researchCandidateDeep(candidateId));
+  } catch (error: any) {
+    return res.status(409).json({ error: error?.message || "No se pudo completar la investigación profunda" });
+  }
 }
 
 export async function setSellingCosts(req: Request, res: Response) {
