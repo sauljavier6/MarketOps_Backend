@@ -68,12 +68,31 @@ function cleanTitle(value: string) {
   return value.replace(/\s*[|–—-]\s*Mercado\s*Libre.*$/i, "").replace(/\s+/g, " ").trim();
 }
 
+function hasExcessiveWordRepetition(title: string) {
+  const words = title.toLowerCase().match(/[a-záéíóúñ0-9]+/g) || [];
+  const counts = new Map<string, number>();
+  for (const word of words) {
+    if (word.length < 4) continue;
+    const count = (counts.get(word) || 0) + 1;
+    counts.set(word, count);
+    if (count >= 3) return true;
+  }
+  return false;
+}
+
 function isConcreteProductTitle(title: string, keyword: string) {
   const normalized = title.toLowerCase();
-  const key = keyword.toLowerCase();
-  if (!normalized.includes(key.split(" ")[0])) return false;
-  if (title.length < key.length + 5 || title.length > 120) return false;
-  return !/mercado libre méxico|listado de|resultados para|categoría|ofertas/i.test(title);
+  const firstKeyword = keyword.toLowerCase().split(" ")[0];
+  if (!normalized.includes(firstKeyword)) return false;
+  if (title.length < Math.max(12, keyword.length + 4) || title.length > 120) return false;
+  if ((title.match(/\S+/g) || []).length < 3) return false;
+  if (hasExcessiveWordRepetition(title)) return false;
+  return !/mercado libre méxico|listado de|resultados para|categoría|ofertas|comprá|compra y vende/i.test(title);
+}
+
+function isMercadoLibreProductUrl(url?: string) {
+  if (!url) return false;
+  return /mercadolibre\.com\.mx/i.test(url) && (/\/p\/MLM/i.test(url) || /\/MLM-?\d+/i.test(url) || /articulo\.mercadolibre\.com\.mx/i.test(url));
 }
 
 function extractMxnPrices(text: string) {
@@ -85,7 +104,14 @@ function extractMxnPrices(text: string) {
 function removePriceOutliers(values: number[]) {
   if (values.length < 4) return values;
   const med = median(values);
-  return values.filter((value) => value >= med * 0.35 && value <= med * 2.8);
+  return values.filter((value) => value >= med * 0.4 && value <= med * 2.5);
+}
+
+function hasReliablePriceSample(values: number[]) {
+  if (values.length < 3) return false;
+  const p25 = percentile(values, 0.25);
+  const p75 = percentile(values, 0.75);
+  return p25 > 0 && p75 / p25 <= 2.5;
 }
 
 async function braveProductDiscovery(keyword: string) {
@@ -93,7 +119,7 @@ async function braveProductDiscovery(keyword: string) {
   try {
     const results = await braveWebSearch(`site:mercadolibre.com.mx ${keyword}`, 12) as BraveMarketResult[];
     const seen = new Set<string>();
-    return results.map((row) => ({ ...row, productTitle: cleanTitle(row.title || "") })).filter((row) => isConcreteProductTitle(row.productTitle, keyword)).filter((row) => {
+    return results.filter((row) => isMercadoLibreProductUrl(row.url)).map((row) => ({ ...row, productTitle: cleanTitle(row.title || "") })).filter((row) => isConcreteProductTitle(row.productTitle, keyword)).filter((row) => {
       const key = row.productTitle.toLowerCase();
       if (seen.has(key)) return false;
       seen.add(key);
@@ -106,15 +132,17 @@ async function braveProductDiscovery(keyword: string) {
 }
 
 async function braveMarketFallback(keyword: string) {
-  if (!process.env.BRAVE_SEARCH_API_KEY) return { results: [], prices: [], estimatedPrice: null, error: "BRAVE_SEARCH_API_KEY_NOT_CONFIGURED" };
+  if (!process.env.BRAVE_SEARCH_API_KEY) return { results: [], prices: [], estimatedPrice: null, reliable: false, error: "BRAVE_SEARCH_API_KEY_NOT_CONFIGURED" };
   try {
-    const results = await braveWebSearch(`site:mercadolibre.com.mx ${keyword} precio`, 12) as BraveMarketResult[];
-    const rawPrices = results.flatMap((row) => extractMxnPrices(`${row.title || ""} ${row.description || ""}`));
+    const results = await braveWebSearch(`site:mercadolibre.com.mx "${keyword}"`, 12) as BraveMarketResult[];
+    const productResults = results.filter((row) => isMercadoLibreProductUrl(row.url));
+    const rawPrices = productResults.flatMap((row) => extractMxnPrices(`${row.title || ""} ${row.description || ""}`));
     const prices = removePriceOutliers(rawPrices);
-    return { results: results.slice(0, 8).map((row) => ({ title: row.title || null, url: row.url || null, description: row.description || null })), prices, estimatedPrice: prices.length ? Number(median(prices).toFixed(2)) : null, error: null };
+    const reliable = hasReliablePriceSample(prices);
+    return { results: productResults.slice(0, 8).map((row) => ({ title: row.title || null, url: row.url || null, description: row.description || null })), prices, estimatedPrice: reliable ? Number(median(prices).toFixed(2)) : null, reliable, error: null };
   } catch (error: any) {
     console.warn("[BRAVE RESEARCH] fallback failed", keyword, error?.message || error);
-    return { results: [], prices: [], estimatedPrice: null, error: error?.message || "BRAVE_SEARCH_FAILED" };
+    return { results: [], prices: [], estimatedPrice: null, reliable: false, error: error?.message || "BRAVE_SEARCH_FAILED" };
   }
 }
 
@@ -122,7 +150,7 @@ export async function discoverConcreteProducts(keyword: string) {
   const predicted = await predictCategory(keyword).catch(() => null);
   const catalog = await searchCatalogProducts(keyword, 10, predicted?.domain_id).catch(() => ({ paging: {}, results: [] as CatalogSearchResult[] }));
   const catalogTitles = catalog.results.map((row) => cleanTitle(row.name || "")).filter((title) => isConcreteProductTitle(title, keyword));
-  const web = await braveProductDiscovery(keyword);
+  const web = catalogTitles.length >= 3 ? [] : await braveProductDiscovery(keyword);
   const titles = [...catalogTitles, ...web.map((row) => row.productTitle)];
   const unique = [...new Set(titles.map((title) => title.trim()).filter(Boolean))];
   return unique.slice(0, 3);
@@ -139,7 +167,7 @@ export async function analyzeKeyword(keyword: string, trendRank: number, totalTr
   const soldQuantities = details.map((row) => Number(row.sold_quantity)).filter((value) => Number.isFinite(value) && value >= 0);
   const winnerSellerIds = new Set(details.map((row) => row.buy_box_winner?.seller_id).filter(Boolean)).size;
   const catalogMatchCount = Number(catalog.paging?.total || catalog.results.length || 0);
-  const brave = winnerPrices.length ? { results: [], prices: [], estimatedPrice: null, error: null } : await braveMarketFallback(keyword);
+  const brave = winnerPrices.length ? { results: [], prices: [], estimatedPrice: null, reliable: false, error: null } : await braveMarketFallback(keyword);
   const rankRatio = totalTrends > 1 ? trendRank / (totalTrends - 1) : 0;
   const demandScore = Math.round(95 - (rankRatio * 40));
   const catalogBreadth = Math.min(100, Math.log10(Math.max(catalogMatchCount, 1)) * 35);
@@ -148,11 +176,11 @@ export async function analyzeKeyword(keyword: string, trendRank: number, totalTr
   const mlPrice = winnerPrices.length ? Number(median(winnerPrices).toFixed(2)) : null;
   const estimatedSalePrice = mlPrice ?? brave.estimatedPrice;
   const allPrices = winnerPrices.length ? winnerPrices : brave.prices;
-  const priceSource = mlPrice ? "MERCADOLIBRE_BUY_BOX" : brave.estimatedPrice ? "BRAVE_OBSERVED_WEB" : null;
-  const evidenceConfidence = mlPrice ? (winnerPrices.length >= 5 ? 85 : winnerPrices.length >= 2 ? 70 : 55) : brave.prices.length >= 5 ? 60 : brave.prices.length >= 3 ? 50 : brave.prices.length ? 35 : catalogMatchCount > 0 ? 30 : 20;
-  const missingReason = estimatedSalePrice ? null : catalogMatchCount > 0 ? "NO_MARKET_PRICE" : "NO_CATALOG_OR_WEB_PRICE";
-  const evidence = { evidenceVersion: 5, keyword, trendRank: trendRank + 1, trendsCount: totalTrends, categoryId: predicted?.category_id || null, domainId: predicted?.domain_id || details[0]?.domain_id || catalog.results[0]?.domain_id || null, catalogMatchCount, catalogProductsSampled: details.length, winnerPriceSampleCount: winnerPrices.length, winnerSellerCount: winnerSellerIds, soldQuantitySampleTotal: soldQuantities.reduce((sum, value) => sum + value, 0), braveResultCount: brave.results.length, bravePriceSampleCount: brave.prices.length, braveResults: brave.results, priceSource, priceRange: allPrices.length ? { min: Math.min(...allPrices), p25: percentile(allPrices, 0.25), median: median(allPrices), p75: percentile(allPrices, 0.75), max: Math.max(...allPrices), samples: allPrices.length } : null, result: estimatedSalePrice ? (mlPrice ? "RESEARCHED_WITH_ML_PRICE" : "RESEARCHED_WITH_BRAVE_PRICE") : "DISCOVERED_INCOMPLETE", missingReason, dataClassification: { estimatedSalePrice: mlPrice ? "REAL_DATA" : brave.estimatedPrice ? "ESTIMATED_DATA" : "UNAVAILABLE_DATA", demandScore: "INFERRED_DATA", competitionScore: "INFERRED_DATA" } };
-  const snapshot = await MarketSnapshot.create({ Source: mlPrice ? "MERCADOLIBRE_CATALOG_API" : brave.estimatedPrice ? "MERCADOLIBRE_BRAVE_RESEARCH" : "MERCADOLIBRE_CATALOG_API", Keyword: keyword, CategoryId: evidence.domainId, ActiveListings: 0, MinPrice: allPrices.length ? Math.min(...allPrices) : null, MedianPrice: estimatedSalePrice, MaxPrice: allPrices.length ? Math.max(...allPrices) : null, CompetitionScore: competitionScore, DemandScore: demandScore, RawSummary: evidence });
+  const priceSource = mlPrice ? "MERCADOLIBRE_BUY_BOX" : brave.estimatedPrice ? "BRAVE_OBSERVED_WEB_VALIDATED" : null;
+  const evidenceConfidence = mlPrice ? (winnerPrices.length >= 5 ? 85 : winnerPrices.length >= 2 ? 70 : 55) : brave.estimatedPrice ? Math.min(65, 45 + brave.prices.length * 3) : catalogMatchCount > 0 ? 30 : 20;
+  const missingReason = estimatedSalePrice ? null : brave.prices.length ? "UNRELIABLE_WEB_PRICE_SAMPLE" : catalogMatchCount > 0 ? "NO_MARKET_PRICE" : "NO_CATALOG_OR_WEB_PRICE";
+  const evidence = { evidenceVersion: 6, keyword, trendRank: trendRank + 1, trendsCount: totalTrends, categoryId: predicted?.category_id || null, domainId: predicted?.domain_id || details[0]?.domain_id || catalog.results[0]?.domain_id || null, catalogMatchCount, catalogProductsSampled: details.length, winnerPriceSampleCount: winnerPrices.length, winnerSellerCount: winnerSellerIds, soldQuantitySampleTotal: soldQuantities.reduce((sum, value) => sum + value, 0), braveResultCount: brave.results.length, bravePriceSampleCount: brave.prices.length, bravePriceReliable: brave.reliable, braveResults: brave.results, priceSource, priceRange: allPrices.length ? { min: Math.min(...allPrices), p25: percentile(allPrices, 0.25), median: median(allPrices), p75: percentile(allPrices, 0.75), max: Math.max(...allPrices), samples: allPrices.length } : null, result: estimatedSalePrice ? (mlPrice ? "RESEARCHED_WITH_ML_PRICE" : "RESEARCHED_WITH_VALIDATED_BRAVE_PRICE") : "DISCOVERED_INCOMPLETE", missingReason, dataClassification: { estimatedSalePrice: mlPrice ? "REAL_DATA" : brave.estimatedPrice ? "ESTIMATED_DATA_VALIDATED" : "UNAVAILABLE_DATA", demandScore: "INFERRED_DATA", competitionScore: "INFERRED_DATA" } };
+  const snapshot = await MarketSnapshot.create({ Source: mlPrice ? "MERCADOLIBRE_CATALOG_API" : brave.estimatedPrice ? "MERCADOLIBRE_BRAVE_RESEARCH" : "MERCADOLIBRE_CATALOG_API", Keyword: keyword, CategoryId: evidence.domainId, ActiveListings: 0, MinPrice: estimatedSalePrice && allPrices.length ? Math.min(...allPrices) : null, MedianPrice: estimatedSalePrice, MaxPrice: estimatedSalePrice && allPrices.length ? Math.max(...allPrices) : null, CompetitionScore: competitionScore, DemandScore: demandScore, RawSummary: evidence });
   return { snapshot, predictedCategory: predicted, estimatedSalePrice, demandScore, competitionScore, evidenceConfidence, evidence };
 }
 
