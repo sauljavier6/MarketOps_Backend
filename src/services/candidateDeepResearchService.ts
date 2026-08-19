@@ -3,13 +3,17 @@ import RadarCandidate from "../models/RadarCandidate";
 import SupplierOffer from "../models/SupplierOffer";
 import { calculateTiming, type CommercialOpportunity } from "./commercialCalendarService";
 import { analyzeDiscoveredProduct, type DiscoveredProduct } from "./mercadoLibreResearchService";
-import { discoverSupplierLeads } from "./supplierAutoDiscoveryService";
 
-function median(values: number[]) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+function shouldQuoteSupplier(market: any, timing: any) {
+  const salePrice = Number(market.estimatedSalePrice || 0);
+  const confidence = Number(market.confidence || 0);
+  const demand = Number(market.demandScore || 0);
+  const marketScore = Number(market.marketScore || 0);
+  const competition = Number(market.competitionScore || 0);
+  const tooLate = timing?.timingStatus === "TOO_LATE";
+
+  if (!salePrice || confidence < 40 || tooLate) return false;
+  return demand >= 50 && marketScore >= 50 && competition <= 85;
 }
 
 export async function researchCandidateDeep(candidateId: number) {
@@ -31,21 +35,32 @@ export async function researchCandidateDeep(candidateId: number) {
     relevanceScore: previousEvidence.sourceRelevanceScore || previousEvidence.scoring?.DiscoveryScore || null,
   };
 
+  // El análisis profundo del Radar es MARKET-FIRST.
+  // Mercado Libre valida mercado, precio, demanda y competencia.
+  // La búsqueda automática de proveedores queda fuera de este flujo porque sus resultados
+  // no son suficientemente confiables para alimentar costos de inversión.
   const market = await analyzeDiscoveredProduct(product, 0, 1);
-  const brave = await discoverSupplierLeads(candidate.Title, 8).catch(() => ({ leads: [] as any[] }));
-  const salePrice = Number(market.estimatedSalePrice || 0) || null;
-  const plausible = brave.leads
-    .filter((lead: any) => lead.PriceHint != null)
-    .map((lead: any) => ({ lead, price: Number(lead.PriceHint) }))
-    .filter((row: any) => Number.isFinite(row.price) && row.price > 0 && (!salePrice || (row.price > salePrice * 0.05 && row.price < salePrice * 0.82)))
-    .sort((a: any, b: any) => Number(b.lead.LeadScore || 0) - Number(a.lead.LeadScore || 0));
 
-  const estimatedPurchasePrice = plausible.length ? Number(Number(median(plausible.map((row: any) => row.price))).toFixed(2)) : null;
-  const verifiedOffer = await SupplierOffer.findOne({ where: { ProductQuery: candidate.Title, State: true }, order: [["updatedAt", "DESC"]] });
+  const verifiedOffer = await SupplierOffer.findOne({
+    where: { ProductQuery: candidate.Title, State: true },
+    order: [["updatedAt", "DESC"]],
+  });
+
   const supplierLeadTime = verifiedOffer?.DeliveryDays == null ? null : Number(verifiedOffer.DeliveryDays);
   const opportunity = (previousEvidence.commercialOpportunity || null) as CommercialOpportunity | null;
   const timing = calculateTiming(opportunity, supplierLeadTime, 3, 7);
   const capital = await CapitalAccount.findOne({ order: [["ID_CapitalAccount", "ASC"]] });
+  const quoteRecommended = shouldQuoteSupplier(market, timing);
+
+  const verifiedSupplier = verifiedOffer ? {
+    name: verifiedOffer.SupplierName,
+    unitPrice: Number(verifiedOffer.UnitPrice),
+    moq: Number(verifiedOffer.MOQ),
+    shippingCost: Number(verifiedOffer.ShippingCost),
+    importCost: Number(verifiedOffer.ImportCost),
+    deliveryDays: verifiedOffer.DeliveryDays,
+    reliabilityScore: Number(verifiedOffer.ReliabilityScore),
+  } : null;
 
   const evidence: any = {
     ...previousEvidence,
@@ -54,22 +69,20 @@ export async function researchCandidateDeep(candidateId: number) {
     commercialOpportunity: previousEvidence.commercialOpportunity,
     trendValidation: previousEvidence.trendValidation,
     sellingCosts: previousEvidence.sellingCosts,
-    deepResearch: { researchedAt: new Date().toISOString(), marketRefreshed: true, supplierSearchCompleted: true },
+    deepResearch: {
+      researchedAt: new Date().toISOString(),
+      marketRefreshed: true,
+      supplierSearchCompleted: false,
+      supplierSearchMode: "MANUAL_VERIFIED",
+      quoteRecommended,
+    },
     sourcing: {
-      provider: "BRAVE_SEARCH",
-      leadsFound: brave.leads.length,
-      estimatedPurchasePrice,
+      provider: verifiedOffer ? "USER_VERIFIED" : "MANUAL_REQUIRED",
+      leadsFound: 0,
+      estimatedPurchasePrice: verifiedOffer ? Number(verifiedOffer.UnitPrice) : null,
       supplierVerified: Boolean(verifiedOffer),
-      verifiedSupplier: verifiedOffer ? {
-        name: verifiedOffer.SupplierName,
-        unitPrice: Number(verifiedOffer.UnitPrice),
-        moq: Number(verifiedOffer.MOQ),
-        shippingCost: Number(verifiedOffer.ShippingCost),
-        importCost: Number(verifiedOffer.ImportCost),
-        deliveryDays: verifiedOffer.DeliveryDays,
-        reliabilityScore: Number(verifiedOffer.ReliabilityScore),
-      } : null,
-      supplierLeads: plausible.slice(0, 8).map((row: any) => ({ name: row.lead.Name, domain: row.lead.Domain, url: row.lead.Url, leadScore: row.lead.LeadScore, priceHint: row.price })),
+      verifiedSupplier,
+      supplierLeads: [],
     },
     timing,
     scoring: {
@@ -82,9 +95,17 @@ export async function researchCandidateDeep(candidateId: number) {
       InvestmentScore: null,
     },
     decision: "RESEARCH",
-    decisionReason: verifiedOffer ? "Proveedor encontrado. Completa los costos de venta y calcula la decisión final." : "Investigación actualizada. Verifica una cotización de proveedor antes de calcular la decisión final.",
-    stage: verifiedOffer ? "ECONOMICS" : "SOURCING",
-    recommendation: { ...(previousEvidence.recommendation || {}), availableCapital: Number(capital?.CurrentCash || 0) },
+    decisionReason: verifiedOffer
+      ? "Cotización de proveedor registrada. Completa los costos de venta y calcula la decisión final."
+      : quoteRecommended
+        ? "El mercado muestra evidencia suficiente. Vale la pena cotizar un proveedor para completar la inversión."
+        : "La evidencia de mercado todavía no justifica dedicar tiempo a cotizar un proveedor.",
+    stage: verifiedOffer ? "ECONOMICS" : "MARKET_RESEARCH",
+    recommendation: {
+      ...(previousEvidence.recommendation || {}),
+      availableCapital: Number(capital?.CurrentCash || 0),
+      quoteSupplier: quoteRecommended,
+    },
   };
 
   await candidate.update({
