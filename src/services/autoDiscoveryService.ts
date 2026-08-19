@@ -2,7 +2,7 @@ import { Op } from "sequelize";
 import CapitalAccount from "../models/CapitalAccount";
 import DiscoveryRun from "../models/DiscoveryRun";
 import RadarCandidate from "../models/RadarCandidate";
-import { createCandidateFromDiscoveredProduct, discoverConcreteProducts, getMexicoTrends } from "./mercadoLibreResearchService";
+import { analyzeDiscoveredProduct, discoverConcreteProducts, getMexicoTrends } from "./mercadoLibreResearchService";
 import { getMexicoSeasonDiscoverySeeds } from "./seasonEngine";
 import { discoverSupplierLeads } from "./supplierAutoDiscoveryService";
 
@@ -13,6 +13,75 @@ function median(values: number[]) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+function clampScore(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+async function createTrendingCandidate(product: any, index: number, total: number) {
+  const market = await analyzeDiscoveredProduct(product, index, total);
+
+  if (!market.estimatedSalePrice) {
+    return {
+      candidate: null,
+      research: {
+        keyword: product.title,
+        sourceTrend: product.sourceTrend,
+        sourceType: product.sourceType,
+        sourceSeason: product.sourceSeason,
+        status: "NO_MARKET_PRICE",
+        estimatedSalePrice: null,
+        marketPriceSamples: market.evidence?.marketPriceSamples || 0,
+        confidenceScore: market.confidence,
+        marketScore: market.marketScore,
+        missingReason: "NO_ML_MARKET_PRICE",
+      },
+    };
+  }
+
+  const evidence: any = market.evidence || {};
+  evidence.marketValidation = {
+    usableForRanking: true,
+    minimumPriceSamples: 1,
+    note: "Un precio oficial de Mercado Libre es suficiente para mostrar el producto. Más muestras aumentan la confianza, pero no ocultan la oportunidad.",
+  };
+
+  const payload = {
+    Title: product.title,
+    Season: market.season?.name || product.sourceSeason || null,
+    EstimatedSalePrice: market.estimatedSalePrice,
+    EstimatedMarketplaceFee: Number(market.fee?.saleFeeAmount || 0),
+    EstimatedShippingCost: 0,
+    PackagingCost: 0,
+    DemandScore: market.demandScore,
+    CompetitionScore: market.competitionScore,
+    SeasonalScore: market.seasonalScore,
+    TrendScore: market.trendScore,
+    MarketScore: market.marketScore,
+    ConfidenceScore: market.confidence,
+    Status: "TRENDING",
+    Evidence: evidence,
+  };
+
+  const existing = await RadarCandidate.findOne({ where: { Title: product.title } });
+  const candidate = existing ? await existing.update(payload) : await RadarCandidate.create(payload);
+
+  return {
+    candidate,
+    research: {
+      keyword: product.title,
+      sourceTrend: product.sourceTrend,
+      sourceType: product.sourceType,
+      sourceSeason: product.sourceSeason,
+      status: "TRENDING",
+      estimatedSalePrice: market.estimatedSalePrice,
+      marketPriceSamples: market.evidence?.marketPriceSamples || 0,
+      confidenceScore: market.confidence,
+      marketScore: market.marketScore,
+      missingReason: null,
+    },
+  };
+}
+
 async function enrichWithSupplierResearch(candidate: RadarCandidate, availableCapital: number) {
   try {
     const result = await discoverSupplierLeads(candidate.Title, 6);
@@ -20,16 +89,19 @@ async function enrichWithSupplierResearch(candidate: RadarCandidate, availableCa
     const plausible = result.leads
       .filter((lead) => lead.PriceHint != null)
       .map((lead) => ({ lead, price: Number(lead.PriceHint) }))
-      .filter((row) => Number.isFinite(row.price) && row.price > salePrice * 0.05 && row.price < salePrice * 0.78)
+      .filter((row) => Number.isFinite(row.price) && row.price > salePrice * 0.05 && row.price < salePrice * 0.82)
       .sort((a, b) => Number(b.lead.LeadScore) - Number(a.lead.LeadScore));
 
     const priceHints = plausible.map((row) => row.price);
-    const estimatedPurchasePrice = priceHints.length >= 2 ? Number(median(priceHints).toFixed(2)) : null;
+    const estimatedPurchasePrice = priceHints.length ? Number(median(priceHints).toFixed(2)) : null;
     const fee = Number(candidate.EstimatedMarketplaceFee || 0);
     const preliminaryProfitBeforeShipping = estimatedPurchasePrice == null ? null : Number((salePrice - estimatedPurchasePrice - fee).toFixed(2));
     const preliminaryMarginBeforeShipping = preliminaryProfitBeforeShipping == null || !salePrice ? null : Number((preliminaryProfitBeforeShipping / salePrice * 100).toFixed(2));
     const testCapital = Math.max(0, availableCapital * 0.25);
     const suggestedTestUnits = estimatedPurchasePrice && estimatedPurchasePrice > 0 ? Math.max(0, Math.floor(testCapital / estimatedPurchasePrice)) : 0;
+
+    const marginScore = preliminaryMarginBeforeShipping == null ? 50 : clampScore((preliminaryMarginBeforeShipping / 40) * 100);
+    const investmentScore = clampScore(Number(candidate.MarketScore || 0) * 0.7 + marginScore * 0.3);
 
     const evidence: any = candidate.Evidence || {};
     evidence.sourcing = {
@@ -51,13 +123,15 @@ async function enrichWithSupplierResearch(candidate: RadarCandidate, availableCa
         finalRecommendationReady: false,
         blockingReason: "VERIFY_SUPPLIER_PRICE_AND_LOGISTICS",
       },
+      investmentScore,
+      investmentScoreClassification: "PRELIMINARY_MARKET_PLUS_ESTIMATED_SUPPLIER_COST",
     };
 
-    await candidate.update({ Evidence: evidence, Status: candidate.Status === "REJECTED" ? "REJECTED" : "SOURCING" });
-    return { leadsFound: result.leads.length, estimatedPurchasePrice, preliminaryMarginBeforeShipping };
+    await candidate.update({ Evidence: evidence, MarketScore: investmentScore, Status: "SOURCING" });
+    return { leadsFound: result.leads.length, estimatedPurchasePrice, preliminaryMarginBeforeShipping, investmentScore };
   } catch (error: any) {
     console.warn("[AUTO DISCOVERY] supplier enrichment failed", candidate.Title, error?.message || error);
-    return { leadsFound: 0, estimatedPurchasePrice: null, preliminaryMarginBeforeShipping: null };
+    return { leadsFound: 0, estimatedPurchasePrice: null, preliminaryMarginBeforeShipping: null, investmentScore: Number(candidate.MarketScore || 0) };
   }
 }
 
@@ -82,10 +156,10 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
 
     const results: any[] = [];
     const researchedProductIds = new Set<string>();
-    const validatedCandidates: RadarCandidate[] = [];
+    const candidatesWithPrice: RadarCandidate[] = [];
     let concreteProductsFound = 0;
     let researched = 0;
-    let researching = 0;
+    let withoutPrice = 0;
 
     for (let index = 0; index < discoveryInputs.length; index += 1) {
       const input = discoveryInputs[index];
@@ -94,6 +168,7 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
       try {
         const products = await discoverConcreteProducts(input.keyword, { sourceType: input.sourceType, sourceSeason: input.sourceSeason, sourceScore: input.sourceScore });
         concreteProductsFound += products.length;
+
         if (!products.length) {
           results.push({ sourceTrend: input.keyword, sourceType: input.sourceType, sourceSeason: input.sourceSeason, status: "SKIPPED", result: "NO_CONCRETE_PRODUCT_FOUND" });
           continue;
@@ -105,10 +180,10 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
           researched += 1;
 
           try {
-            const result = await createCandidateFromDiscoveredProduct(product, index, discoveryInputs.length);
+            const result = await createTrendingCandidate(product, index, discoveryInputs.length);
             results.push(result.research);
-            if (result.candidate) validatedCandidates.push(result.candidate);
-            else researching += 1;
+            if (result.candidate) candidatesWithPrice.push(result.candidate);
+            else withoutPrice += 1;
           } catch (error: any) {
             console.warn("[AUTO DISCOVERY] product research failed", product.title, error?.message || error);
             results.push({ keyword: product.title, sourceTrend: input.keyword, sourceType: input.sourceType, sourceSeason: input.sourceSeason, status: "FAILED", result: "RESEARCH_FAILED", missingReason: error?.message || "UNKNOWN_ERROR" });
@@ -120,10 +195,16 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
       }
     }
 
-    validatedCandidates.sort((a, b) => Number(b.MarketScore) - Number(a.MarketScore) || Number(b.ConfidenceScore) - Number(a.ConfidenceScore));
-    const shortlist = validatedCandidates.filter((candidate) => Number(candidate.ConfidenceScore) >= 70 && Number((candidate.Evidence as any)?.marketPriceSamples || 0) >= 3 && Number(candidate.MarketScore) >= 60).slice(0, 5);
+    candidatesWithPrice.sort((a, b) => Number(b.MarketScore) - Number(a.MarketScore) || Number(b.ConfidenceScore) - Number(a.ConfidenceScore));
+
+    // Investiga proveedores de los productos más atractivos. Un solo precio ML basta para entrar al Radar.
+    const sourcingShortlist = candidatesWithPrice.slice(0, Math.min(8, candidatesWithPrice.length));
     const sourcingResults = [];
-    for (const candidate of shortlist) sourcingResults.push({ candidateId: candidate.ID_RadarCandidate, title: candidate.Title, ...(await enrichWithSupplierResearch(candidate, availableCapital)) });
+    for (const candidate of sourcingShortlist) {
+      sourcingResults.push({ candidateId: candidate.ID_RadarCandidate, title: candidate.Title, ...(await enrichWithSupplierResearch(candidate, availableCapital)) });
+    }
+
+    const rankedCandidates = [...candidatesWithPrice].sort((a, b) => Number(b.MarketScore) - Number(a.MarketScore) || Number(b.ConfidenceScore) - Number(a.ConfidenceScore));
 
     const summary = {
       trendsFound: trends.length,
@@ -134,17 +215,28 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
       discoveryQueriesAnalyzed: discoveryInputs.length,
       concreteProductsFound,
       productsResearched: researched,
-      validatedMarketCandidates: validatedCandidates.length,
-      researchingCandidates: researching,
-      skippedWithoutReliableMarketPrice: researching,
-      sourcingShortlist: shortlist.length,
+      productsWithMlPrice: candidatesWithPrice.length,
+      validatedMarketCandidates: candidatesWithPrice.length,
+      withoutMlPrice: withoutPrice,
+      skippedWithoutReliableMarketPrice: withoutPrice,
+      sourcingShortlist: sourcingShortlist.length,
       availableCapital,
       failed: results.filter((row) => row.status === "FAILED").length,
+      topOpportunities: rankedCandidates.slice(0, 10).map((candidate, rank) => ({
+        rank: rank + 1,
+        candidateId: candidate.ID_RadarCandidate,
+        title: candidate.Title,
+        salePrice: Number(candidate.EstimatedSalePrice || 0),
+        score: Number(candidate.MarketScore || 0),
+        confidence: Number(candidate.ConfidenceScore || 0),
+        season: candidate.Season || null,
+        status: candidate.Status,
+      })),
       results,
       sourcingResults,
     };
 
-    await run.update({ Status: "COMPLETED", TrendsFound: trends.length, TrendsAnalyzed: discoveryInputs.length, CatalogMatches: researched, WithMarketPrice: validatedCandidates.length, CandidatesCreated: validatedCandidates.length, CandidatesWithoutPrice: researching, Summary: summary, FinishedAt: new Date() });
+    await run.update({ Status: "COMPLETED", TrendsFound: trends.length, TrendsAnalyzed: discoveryInputs.length, CatalogMatches: researched, WithMarketPrice: candidatesWithPrice.length, CandidatesCreated: candidatesWithPrice.length, CandidatesWithoutPrice: withoutPrice, Summary: summary, FinishedAt: new Date() });
     return { run, summary };
   } catch (error: any) {
     await run.update({ Status: "FAILED", ErrorMessage: error?.message || "Discovery failed", FinishedAt: new Date() });
