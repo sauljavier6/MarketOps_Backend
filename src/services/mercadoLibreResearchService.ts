@@ -9,6 +9,8 @@ const SITE_ID = "MLM";
 type Trend = { keyword: string; url?: string };
 type CatalogSearchResult = { id?: string; name?: string; status?: string; domain_id?: string };
 type CatalogProductDetail = { id?: string; name?: string; status?: string; domain_id?: string; sold_quantity?: number; children_ids?: string[]; buy_box_winner?: { item_id?: string; seller_id?: number; price?: number; currency_id?: string; available_quantity?: number } | null };
+type CatalogItem = { item_id?: string; seller_id?: number; price?: number; currency_id?: string; available_quantity?: number; condition?: string };
+type CatalogItemsResponse = { paging?: { total?: number; offset?: number; limit?: number }; results?: CatalogItem[] };
 type SalePrice = { price_id?: string; amount?: number; regular_amount?: number | null; currency_id?: string; reference_date?: string };
 
 function buildMercadoLibreError(path: string, status: number, body: any) {
@@ -52,18 +54,19 @@ export async function getCatalogProduct(productId: string) {
   return authorizedGet<CatalogProductDetail>(`/products/${encodeURIComponent(productId)}`);
 }
 
+export async function getCatalogProductItems(productId: string) {
+  return authorizedGet<CatalogItemsResponse>(`/products/${encodeURIComponent(productId)}/items`);
+}
+
 export async function getItemSalePrice(itemId: string) {
   return authorizedGet<SalePrice>(`/items/${encodeURIComponent(itemId)}/sale_price?context=channel_marketplace`);
 }
 
-async function resolvePurchasableProducts(detail: CatalogProductDetail, depth = 0): Promise<CatalogProductDetail[]> {
-  if (detail.buy_box_winner?.item_id) return [detail];
-  if (depth >= 2 || !Array.isArray(detail.children_ids) || !detail.children_ids.length) return [detail];
-
-  const children = (await Promise.all(detail.children_ids.slice(0, 8).map((id) => getCatalogProduct(id).catch(() => null)))).filter(Boolean) as CatalogProductDetail[];
+async function resolveTerminalProducts(detail: CatalogProductDetail, depth = 0): Promise<CatalogProductDetail[]> {
+  if (depth >= 3 || !Array.isArray(detail.children_ids) || !detail.children_ids.length) return [detail];
+  const children = (await Promise.all(detail.children_ids.slice(0, 10).map((id) => getCatalogProduct(id).catch(() => null)))).filter(Boolean) as CatalogProductDetail[];
   if (!children.length) return [detail];
-
-  const resolved = (await Promise.all(children.map((child) => resolvePurchasableProducts(child, depth + 1)))).flat();
+  const resolved = (await Promise.all(children.map((child) => resolveTerminalProducts(child, depth + 1)))).flat();
   return resolved.length ? resolved : [detail];
 }
 
@@ -95,7 +98,7 @@ function isConcreteProductTitle(title: string, keyword: string) {
 function removePriceOutliers(values: number[]) {
   if (values.length < 4) return values;
   const med = median(values);
-  return values.filter((value) => value >= med * 0.45 && value <= med * 2.2);
+  return values.filter((value) => value >= med * 0.5 && value <= med * 2);
 }
 
 export async function discoverConcreteProducts(keyword: string) {
@@ -113,57 +116,77 @@ export async function analyzeKeyword(keyword: string, trendRank: number, totalTr
   });
 
   const rootDetails = (await Promise.all(catalog.results.slice(0, 8).map(async (product) => product.id ? getCatalogProduct(product.id).catch(() => null) : null))).filter(Boolean) as CatalogProductDetail[];
-  const details = (await Promise.all(rootDetails.map((detail) => resolvePurchasableProducts(detail)))).flat().slice(0, 24);
-  const winnerItems = [...new Set(details.map((row) => row.buy_box_winner?.item_id).filter((itemId): itemId is string => Boolean(itemId)))];
+  const terminalDetails = (await Promise.all(rootDetails.map((detail) => resolveTerminalProducts(detail)))).flat().filter((detail) => detail.id).slice(0, 24);
 
-  const salePrices = (await Promise.all(winnerItems.slice(0, 16).map(async (itemId) => {
+  const pdpResponses = (await Promise.all(terminalDetails.slice(0, 16).map(async (detail) => {
     try {
-      const price = await getItemSalePrice(itemId);
-      const amount = Number(price.amount);
-      return Number.isFinite(amount) && amount > 0 && price.currency_id === "MXN" ? { itemId, amount, regularAmount: price.regular_amount ?? null, referenceDate: price.reference_date ?? null } : null;
+      const response = await getCatalogProductItems(detail.id!);
+      return { productId: detail.id!, response };
     } catch (error: any) {
-      console.warn("[MELI RESEARCH] sale price unavailable", { itemId, message: error?.message || String(error) });
+      console.warn("[MELI RESEARCH] product items unavailable", { productId: detail.id, message: error?.message || String(error) });
       return null;
     }
-  }))).filter(Boolean) as Array<{ itemId: string; amount: number; regularAmount: number | null; referenceDate: string | null }>;
+  }))).filter(Boolean) as Array<{ productId: string; response: CatalogItemsResponse }>;
+
+  const catalogItems = pdpResponses.flatMap(({ productId, response }) => (response.results || []).map((item) => ({ ...item, productId })));
+  const uniqueItems = [...new Map(catalogItems.filter((item) => item.item_id).map((item) => [item.item_id!, item])).values()];
+  const totalCompetingListings = pdpResponses.reduce((sum, row) => sum + Number(row.response.paging?.total || row.response.results?.length || 0), 0);
+
+  const salePrices = (await Promise.all(uniqueItems.slice(0, 20).map(async (item) => {
+    const fallbackAmount = Number(item.price);
+    try {
+      const price = await getItemSalePrice(item.item_id!);
+      const amount = Number(price.amount);
+      if (Number.isFinite(amount) && amount > 0 && price.currency_id === "MXN") {
+        return { itemId: item.item_id!, productId: item.productId, sellerId: item.seller_id ?? null, amount, regularAmount: price.regular_amount ?? null, referenceDate: price.reference_date ?? null, source: "SALE_PRICE_API" };
+      }
+    } catch (error: any) {
+      console.warn("[MELI RESEARCH] sale price unavailable", { itemId: item.item_id, message: error?.message || String(error) });
+    }
+    return Number.isFinite(fallbackAmount) && fallbackAmount > 0 && item.currency_id === "MXN"
+      ? { itemId: item.item_id!, productId: item.productId, sellerId: item.seller_id ?? null, amount: fallbackAmount, regularAmount: null, referenceDate: null, source: "PDP_ITEMS_API" }
+      : null;
+  }))).filter(Boolean) as Array<{ itemId: string; productId: string; sellerId: number | null; amount: number; regularAmount: number | null; referenceDate: string | null; source: string }>;
 
   const officialPrices = removePriceOutliers(salePrices.map((row) => row.amount));
-  const soldQuantities = details.map((row) => Number(row.sold_quantity)).filter((value) => Number.isFinite(value) && value >= 0);
-  const winnerSellerIds = new Set(details.map((row) => row.buy_box_winner?.seller_id).filter(Boolean)).size;
+  const sellerIds = new Set(uniqueItems.map((row) => row.seller_id).filter(Boolean)).size;
   const catalogMatchCount = Number(catalog.paging?.total || catalog.results.length || 0);
   const rankRatio = totalTrends > 1 ? trendRank / (totalTrends - 1) : 0;
   const demandScore = Math.round(95 - (rankRatio * 40));
-  const catalogBreadth = Math.min(100, Math.log10(Math.max(catalogMatchCount, 1)) * 35);
-  const winnerDiversity = Math.min(100, winnerSellerIds * 12);
-  const competitionScore = Math.round((catalogBreadth * 0.7) + (winnerDiversity * 0.3));
+  const listingBreadth = Math.min(100, Math.log10(Math.max(totalCompetingListings, 1)) * 38);
+  const sellerDiversity = Math.min(100, sellerIds * 8);
+  const competitionScore = Math.round((listingBreadth * 0.75) + (sellerDiversity * 0.25));
   const estimatedSalePrice = officialPrices.length ? Number(median(officialPrices).toFixed(2)) : null;
-  const evidenceConfidence = officialPrices.length >= 5 ? 90 : officialPrices.length >= 3 ? 80 : officialPrices.length >= 2 ? 70 : officialPrices.length === 1 ? 55 : winnerItems.length ? 40 : catalogMatchCount > 0 ? 30 : 20;
-  const missingReason = estimatedSalePrice ? null : winnerItems.length ? "SALE_PRICE_UNAVAILABLE" : rootDetails.some((row) => row.children_ids?.length) ? "NO_BUY_BOX_IN_CHILDREN" : catalogMatchCount > 0 ? "NO_BUY_BOX_ITEM" : "NO_CATALOG_MATCH";
+  const salePriceApiCount = salePrices.filter((row) => row.source === "SALE_PRICE_API").length;
+  const evidenceConfidence = officialPrices.length >= 8 ? 95 : officialPrices.length >= 5 ? 90 : officialPrices.length >= 3 ? 82 : officialPrices.length >= 2 ? 72 : officialPrices.length === 1 ? 58 : totalCompetingListings > 0 ? 40 : catalogMatchCount > 0 ? 30 : 20;
+  const missingReason = estimatedSalePrice ? null : totalCompetingListings > 0 ? "PDP_LISTINGS_WITHOUT_PRICE" : terminalDetails.length ? "NO_PDP_LISTINGS" : catalogMatchCount > 0 ? "NO_TERMINAL_CATALOG_PRODUCT" : "NO_CATALOG_MATCH";
 
   const evidence = {
-    evidenceVersion: 8,
+    evidenceVersion: 9,
     keyword,
     trendRank: trendRank + 1,
     trendsCount: totalTrends,
     categoryId: predicted?.category_id || null,
-    domainId: predicted?.domain_id || details[0]?.domain_id || catalog.results[0]?.domain_id || null,
+    domainId: predicted?.domain_id || terminalDetails[0]?.domain_id || catalog.results[0]?.domain_id || null,
     catalogMatchCount,
     catalogRootProductsSampled: rootDetails.length,
-    catalogProductsSampled: details.length,
-    catalogParentCount: rootDetails.filter((row) => row.children_ids?.length).length,
-    buyBoxItemCount: winnerItems.length,
+    terminalProductsSampled: terminalDetails.length,
+    pdpProductsWithListings: pdpResponses.filter((row) => Number(row.response.paging?.total || row.response.results?.length || 0) > 0).length,
+    competingListings: totalCompetingListings,
+    uniqueItemsSampled: uniqueItems.length,
+    uniqueSellerCount: sellerIds,
     salePriceSampleCount: officialPrices.length,
-    winnerSellerCount: winnerSellerIds,
-    soldQuantitySampleTotal: soldQuantities.reduce((sum, value) => sum + value, 0),
-    salePriceEvidence: salePrices.slice(0, 8),
-    priceSource: estimatedSalePrice ? "MERCADOLIBRE_SALE_PRICE_API" : null,
+    salePriceApiCount,
+    pdpItemPriceCount: salePrices.length - salePriceApiCount,
+    salePriceEvidence: salePrices.slice(0, 12),
+    priceSource: estimatedSalePrice ? (salePriceApiCount ? "MERCADOLIBRE_SALE_PRICE_API" : "MERCADOLIBRE_PDP_ITEMS_API") : null,
     priceRange: officialPrices.length ? { min: Math.min(...officialPrices), p25: percentile(officialPrices, 0.25), median: median(officialPrices), p75: percentile(officialPrices, 0.75), max: Math.max(...officialPrices), samples: officialPrices.length } : null,
-    result: estimatedSalePrice ? "RESEARCHED_WITH_OFFICIAL_ML_PRICE" : "DISCOVERED_INCOMPLETE",
+    result: estimatedSalePrice ? "RESEARCHED_WITH_OFFICIAL_ML_MARKET_PRICES" : "DISCOVERED_INCOMPLETE",
     missingReason,
-    dataClassification: { estimatedSalePrice: estimatedSalePrice ? "REAL_DATA" : "UNAVAILABLE_DATA", demandScore: "INFERRED_DATA", competitionScore: "INFERRED_DATA", supplierPrice: "PENDING_BRAVE_SUPPLIER_RESEARCH" },
+    dataClassification: { estimatedSalePrice: estimatedSalePrice ? "REAL_DATA" : "UNAVAILABLE_DATA", competingListings: totalCompetingListings ? "REAL_DATA" : "UNAVAILABLE_DATA", demandScore: "INFERRED_DATA", competitionScore: "INFERRED_FROM_REAL_LISTINGS", supplierPrice: "PENDING_BRAVE_SUPPLIER_RESEARCH" },
   };
 
-  const snapshot = await MarketSnapshot.create({ Source: "MERCADOLIBRE_SALE_PRICE_API", Keyword: keyword, CategoryId: evidence.domainId, ActiveListings: 0, MinPrice: officialPrices.length ? Math.min(...officialPrices) : null, MedianPrice: estimatedSalePrice, MaxPrice: officialPrices.length ? Math.max(...officialPrices) : null, CompetitionScore: competitionScore, DemandScore: demandScore, RawSummary: evidence });
+  const snapshot = await MarketSnapshot.create({ Source: evidence.priceSource || "MERCADOLIBRE_CATALOG_API", Keyword: keyword, CategoryId: evidence.domainId, ActiveListings: totalCompetingListings, MinPrice: officialPrices.length ? Math.min(...officialPrices) : null, MedianPrice: estimatedSalePrice, MaxPrice: officialPrices.length ? Math.max(...officialPrices) : null, CompetitionScore: competitionScore, DemandScore: demandScore, RawSummary: evidence });
   return { snapshot, predictedCategory: predicted, estimatedSalePrice, demandScore, competitionScore, evidenceConfidence, evidence };
 }
 
