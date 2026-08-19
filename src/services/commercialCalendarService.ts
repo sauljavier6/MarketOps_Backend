@@ -86,9 +86,10 @@ export function getCommercialCalendar(now = new Date(), horizonDays = 120): Comm
 
 export function getSeasonDiscoveryPlan(now = new Date(), options?: { horizonDays?: number; maxSeasons?: number; hypothesesPerSeason?: number }) {
   const horizonDays = options?.horizonDays ?? 120;
-  const maxSeasons = options?.maxSeasons ?? 5;
   const hypothesesPerSeason = options?.hypothesesPerSeason ?? 8;
-  return getCommercialCalendar(now, horizonDays).filter((row) => row.stage !== "TOO_LATE" && row.stage !== "UPCOMING").slice(0, maxSeasons).map((row) => ({ ...row, hypotheses: row.hypotheses.slice(0, Math.max(1, Math.min(10, hypothesesPerSeason))) }));
+  return getCommercialCalendar(now, horizonDays)
+    .filter((row) => row.stage !== "TOO_LATE" && row.stage !== "UPCOMING")
+    .map((row) => ({ ...row, hypotheses: row.hypotheses.slice(0, Math.max(1, Math.min(10, hypothesesPerSeason))) }));
 }
 
 export function calculateTiming(opportunity: CommercialOpportunity | null, supplierLeadTimeDays: number | null, preparationDays = 3, safetyBufferDays = 7) {
