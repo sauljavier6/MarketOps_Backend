@@ -16,7 +16,7 @@ export async function discoverCandidate(req: Request, res: Response) {
 }
 
 export async function getRadarCandidates(_req: Request, res: Response) {
-  res.json(await RadarCandidate.findAll({ where: { Status: { [Op.notIn]: ["ARCHIVED", "REJECTED", "RESEARCH_REQUIRED"] } }, order: [["MarketScore", "DESC"], ["ConfidenceScore", "DESC"]], limit: 12 }));
+  res.json(await RadarCandidate.findAll({ where: { Status: { [Op.notIn]: ["ARCHIVED", "REJECTED", "RESEARCH_REQUIRED"] } }, order: [["MarketScore", "DESC"], ["ConfidenceScore", "DESC"]], limit: 20 }));
 }
 
 export async function addSupplierOffer(req: Request, res: Response) {
