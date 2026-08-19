@@ -8,6 +8,7 @@ const API_BASE = "https://api.mercadolibre.com";
 const SITE_ID = "MLM";
 
 type Trend = { keyword: string; url?: string };
+type BraveMarketResult = { title?: string; url?: string; description?: string };
 type CatalogSearchResult = { id?: string; name?: string; status?: string; domain_id?: string };
 type CatalogProductDetail = { id?: string; name?: string; status?: string; domain_id?: string; sold_quantity?: number; buy_box_winner?: { item_id?: string; seller_id?: number; price?: number; currency_id?: string; available_quantity?: number; shipping?: { free_shipping?: boolean; mode?: string } } };
 
@@ -66,10 +67,10 @@ function extractMxnPrices(text: string) {
 async function braveMarketFallback(keyword: string) {
   if (!process.env.BRAVE_SEARCH_API_KEY) return { results: [], prices: [], estimatedPrice: null, error: "BRAVE_SEARCH_API_KEY_NOT_CONFIGURED" };
   try {
-    const results = await braveWebSearch(`site:mercadolibre.com.mx ${keyword} precio`, 10);
-    const prices = results.flatMap((row) => extractMxnPrices(`${row.title || ""} ${row.description || ""}`));
+    const results = await braveWebSearch(`site:mercadolibre.com.mx ${keyword} precio`, 10) as BraveMarketResult[];
+    const prices = results.flatMap((row: BraveMarketResult) => extractMxnPrices(`${row.title || ""} ${row.description || ""}`));
     return {
-      results: results.slice(0, 8).map((row) => ({ title: row.title || null, url: row.url || null, description: row.description || null })),
+      results: results.slice(0, 8).map((row: BraveMarketResult) => ({ title: row.title || null, url: row.url || null, description: row.description || null })),
       prices,
       estimatedPrice: prices.length ? Number(median(prices).toFixed(2)) : null,
       error: null,
