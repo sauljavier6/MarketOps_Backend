@@ -13,9 +13,9 @@ const STRATEGY = {
   evergreenWeight: 0.30,
   horizonDays: 120,
   maxSeasons: 5,
-  productsPerSeason: 5,
+  productsPerSeason: 10,
   evergreenProducts: 10,
-  sourcingCandidates: 6,
+  sourcingCandidates: 10,
   maxUnitCostPercentOfCapital: 0.30,
   minimumReservePercent: 0.30,
   maxAllocationPerProduct: 0.25,
@@ -57,16 +57,21 @@ async function persistCandidate(product: any, market: any, opportunity: Commerci
   const previous = await RadarCandidate.findOne({ where: { Title: product.title } });
   const previousEvidence: any = previous?.Evidence || {};
   const evidence: any = market.evidence || {};
+  const evidenceStrength = evidence.evidenceStrength || (market.estimatedSalePrice ? "LOW" : "NONE");
+  const stage = market.estimatedSalePrice && evidenceStrength !== "LOW" ? "MARKET_VALIDATED" : "MARKET_RESEARCH";
+  const productRelevance = Number(product.relevanceScore || 0);
+  const discoveryScore = Math.round(productRelevance * 0.65 + Number(trend.score || 0) * 0.35);
+
   evidence.sourceStrategy = sourceStrategy;
   evidence.commercialOpportunity = opportunity;
   evidence.trendValidation = trend;
-  evidence.stage = market.estimatedSalePrice ? "MARKET_VALIDATED" : "MARKET_RESEARCH";
+  evidence.stage = stage;
   evidence.decision = "RESEARCH";
   if (previousEvidence.sellingCosts) evidence.sellingCosts = previousEvidence.sellingCosts;
   evidence.scoring = {
     SeasonScore: opportunity ? timingPriority(opportunity.stage) : 50,
     TimingScore: opportunity ? timingPriority(opportunity.stage) : 70,
-    DiscoveryScore: trend.score,
+    DiscoveryScore: discoveryScore,
     DemandScore: market.demandScore,
     MarketScore: market.marketScore,
     CompetitionScore: market.competitionScore,
@@ -77,7 +82,7 @@ async function persistCandidate(product: any, market: any, opportunity: Commerci
     DataConfidence: market.confidence,
     InvestmentScore: null,
   };
-  evidence.qualityGates = { concreteProduct: true, marketPriceVerified: Boolean(market.estimatedSalePrice), supplierVerified: false, economicsReady: false, timingReady: false, capitalFit: false, minimumMargin: false, minimumROI: false, acceptableRisk: false, minimumConfidence: market.confidence >= 40 };
+  evidence.qualityGates = { concreteProduct: productRelevance >= 35, marketPriceVerified: Boolean(market.estimatedSalePrice), supplierVerified: false, economicsReady: false, timingReady: false, capitalFit: false, minimumMargin: false, minimumROI: false, acceptableRisk: false, minimumConfidence: market.confidence >= 40 };
 
   const payload = {
     Title: product.title,
@@ -92,7 +97,7 @@ async function persistCandidate(product: any, market: any, opportunity: Commerci
     TrendScore: trend.score,
     MarketScore: market.marketScore,
     ConfidenceScore: market.confidence,
-    Status: market.estimatedSalePrice ? "MARKET_VALIDATED" : "MARKET_RESEARCH",
+    Status: stage,
     Evidence: evidence,
   };
 
@@ -115,7 +120,7 @@ async function discoverSeasonProducts(opportunity: CommercialOpportunity, trends
         const trend = trendEvidence(product.title, hypothesis, trends);
         const candidate = await persistCandidate(product, market, opportunity, trend, "SEASONAL");
         candidates.push(candidate);
-        results.push({ title: product.title, hypothesis, season: opportunity.name, sourceStrategy: "SEASONAL", salePrice: market.estimatedSalePrice, confidence: market.confidence, marketScore: market.marketScore, trendValidation: trend });
+        results.push({ title: product.title, hypothesis, season: opportunity.name, sourceStrategy: "SEASONAL", relevanceScore: product.relevanceScore, salePrice: market.estimatedSalePrice, confidence: market.confidence, evidenceStrength: market.evidence.evidenceStrength, marketScore: market.marketScore, trendValidation: trend });
       } catch (error: any) {
         results.push({ title: product.title, hypothesis, season: opportunity.name, sourceStrategy: "SEASONAL", status: "FAILED", error: error?.message || "RESEARCH_FAILED" });
       }
@@ -143,7 +148,7 @@ async function discoverEvergreenProducts(trends: Array<{ keyword: string }>, res
         const trend = trendEvidence(product.title, hypothesis, trends);
         const candidate = await persistCandidate(product, market, null, trend, "EVERGREEN");
         candidates.push(candidate);
-        results.push({ title: product.title, hypothesis, sourceStrategy: "EVERGREEN", salePrice: market.estimatedSalePrice, confidence: market.confidence, marketScore: market.marketScore, trendValidation: trend });
+        results.push({ title: product.title, hypothesis, sourceStrategy: "EVERGREEN", relevanceScore: product.relevanceScore, salePrice: market.estimatedSalePrice, confidence: market.confidence, evidenceStrength: market.evidence.evidenceStrength, marketScore: market.marketScore, trendValidation: trend });
       } catch (error: any) {
         results.push({ title: product.title, hypothesis, sourceStrategy: "EVERGREEN", status: "FAILED", error: error?.message || "RESEARCH_FAILED" });
       }
@@ -203,7 +208,7 @@ export async function runMercadoLibreDiscovery(categoryId?: string, _maxTrends =
     const availableCapital = capitalAccount ? Number(capitalAccount.CurrentCash || 0) : 0;
     const trends = await getMexicoTrends(categoryId);
     const calendar = getCommercialCalendar(now, STRATEGY.horizonDays);
-    const seasonPlan = getSeasonDiscoveryPlan(now, { horizonDays: STRATEGY.horizonDays, maxSeasons: STRATEGY.maxSeasons, hypothesesPerSeason: 8 });
+    const seasonPlan = getSeasonDiscoveryPlan(now, { horizonDays: STRATEGY.horizonDays, maxSeasons: STRATEGY.maxSeasons, hypothesesPerSeason: 10 });
     const researchedIds = new Set<string>();
     const results: any[] = [];
     const allCandidates: RadarCandidate[] = [];
