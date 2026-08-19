@@ -8,7 +8,7 @@ const SITE_ID = "MLM";
 
 type Trend = { keyword: string; url?: string };
 type CatalogSearchResult = { id?: string; name?: string; status?: string; domain_id?: string };
-type CatalogProductDetail = { id?: string; name?: string; status?: string; domain_id?: string; sold_quantity?: number; buy_box_winner?: { item_id?: string; seller_id?: number; price?: number; currency_id?: string; available_quantity?: number } };
+type CatalogProductDetail = { id?: string; name?: string; status?: string; domain_id?: string; sold_quantity?: number; children_ids?: string[]; buy_box_winner?: { item_id?: string; seller_id?: number; price?: number; currency_id?: string; available_quantity?: number } | null };
 type SalePrice = { price_id?: string; amount?: number; regular_amount?: number | null; currency_id?: string; reference_date?: string };
 
 function buildMercadoLibreError(path: string, status: number, body: any) {
@@ -56,6 +56,17 @@ export async function getItemSalePrice(itemId: string) {
   return authorizedGet<SalePrice>(`/items/${encodeURIComponent(itemId)}/sale_price?context=channel_marketplace`);
 }
 
+async function resolvePurchasableProducts(detail: CatalogProductDetail, depth = 0): Promise<CatalogProductDetail[]> {
+  if (detail.buy_box_winner?.item_id) return [detail];
+  if (depth >= 2 || !Array.isArray(detail.children_ids) || !detail.children_ids.length) return [detail];
+
+  const children = (await Promise.all(detail.children_ids.slice(0, 8).map((id) => getCatalogProduct(id).catch(() => null)))).filter(Boolean) as CatalogProductDetail[];
+  if (!children.length) return [detail];
+
+  const resolved = (await Promise.all(children.map((child) => resolvePurchasableProducts(child, depth + 1)))).flat();
+  return resolved.length ? resolved : [detail];
+}
+
 function median(values: number[]) {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -101,14 +112,17 @@ export async function analyzeKeyword(keyword: string, trendRank: number, totalTr
     throw error;
   });
 
-  const details = (await Promise.all(catalog.results.slice(0, 10).map(async (product) => product.id ? getCatalogProduct(product.id).catch(() => null) : null))).filter(Boolean) as CatalogProductDetail[];
-  const winnerItems = details.map((row) => row.buy_box_winner?.item_id).filter((itemId): itemId is string => Boolean(itemId));
-  const salePrices = (await Promise.all(winnerItems.map(async (itemId) => {
+  const rootDetails = (await Promise.all(catalog.results.slice(0, 8).map(async (product) => product.id ? getCatalogProduct(product.id).catch(() => null) : null))).filter(Boolean) as CatalogProductDetail[];
+  const details = (await Promise.all(rootDetails.map((detail) => resolvePurchasableProducts(detail)))).flat().slice(0, 24);
+  const winnerItems = [...new Set(details.map((row) => row.buy_box_winner?.item_id).filter((itemId): itemId is string => Boolean(itemId)))];
+
+  const salePrices = (await Promise.all(winnerItems.slice(0, 16).map(async (itemId) => {
     try {
       const price = await getItemSalePrice(itemId);
       const amount = Number(price.amount);
       return Number.isFinite(amount) && amount > 0 && price.currency_id === "MXN" ? { itemId, amount, regularAmount: price.regular_amount ?? null, referenceDate: price.reference_date ?? null } : null;
-    } catch {
+    } catch (error: any) {
+      console.warn("[MELI RESEARCH] sale price unavailable", { itemId, message: error?.message || String(error) });
       return null;
     }
   }))).filter(Boolean) as Array<{ itemId: string; amount: number; regularAmount: number | null; referenceDate: string | null }>;
@@ -123,18 +137,20 @@ export async function analyzeKeyword(keyword: string, trendRank: number, totalTr
   const winnerDiversity = Math.min(100, winnerSellerIds * 12);
   const competitionScore = Math.round((catalogBreadth * 0.7) + (winnerDiversity * 0.3));
   const estimatedSalePrice = officialPrices.length ? Number(median(officialPrices).toFixed(2)) : null;
-  const evidenceConfidence = officialPrices.length >= 5 ? 90 : officialPrices.length >= 3 ? 80 : officialPrices.length >= 2 ? 70 : officialPrices.length === 1 ? 55 : catalogMatchCount > 0 ? 35 : 20;
-  const missingReason = estimatedSalePrice ? null : winnerItems.length ? "SALE_PRICE_UNAVAILABLE" : catalogMatchCount > 0 ? "NO_BUY_BOX_ITEM" : "NO_CATALOG_MATCH";
+  const evidenceConfidence = officialPrices.length >= 5 ? 90 : officialPrices.length >= 3 ? 80 : officialPrices.length >= 2 ? 70 : officialPrices.length === 1 ? 55 : winnerItems.length ? 40 : catalogMatchCount > 0 ? 30 : 20;
+  const missingReason = estimatedSalePrice ? null : winnerItems.length ? "SALE_PRICE_UNAVAILABLE" : rootDetails.some((row) => row.children_ids?.length) ? "NO_BUY_BOX_IN_CHILDREN" : catalogMatchCount > 0 ? "NO_BUY_BOX_ITEM" : "NO_CATALOG_MATCH";
 
   const evidence = {
-    evidenceVersion: 7,
+    evidenceVersion: 8,
     keyword,
     trendRank: trendRank + 1,
     trendsCount: totalTrends,
     categoryId: predicted?.category_id || null,
     domainId: predicted?.domain_id || details[0]?.domain_id || catalog.results[0]?.domain_id || null,
     catalogMatchCount,
+    catalogRootProductsSampled: rootDetails.length,
     catalogProductsSampled: details.length,
+    catalogParentCount: rootDetails.filter((row) => row.children_ids?.length).length,
     buyBoxItemCount: winnerItems.length,
     salePriceSampleCount: officialPrices.length,
     winnerSellerCount: winnerSellerIds,
