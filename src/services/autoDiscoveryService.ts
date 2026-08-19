@@ -3,6 +3,7 @@ import CapitalAccount from "../models/CapitalAccount";
 import DiscoveryRun from "../models/DiscoveryRun";
 import RadarCandidate from "../models/RadarCandidate";
 import { createCandidateFromDiscoveredProduct, discoverConcreteProducts, getMexicoTrends } from "./mercadoLibreResearchService";
+import { getMexicoSeasonDiscoverySeeds } from "./seasonEngine";
 import { discoverSupplierLeads } from "./supplierAutoDiscoveryService";
 
 function median(values: number[]) {
@@ -69,23 +70,32 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
     const capitalAccount = await CapitalAccount.findOne({ order: [["ID_CapitalAccount", "ASC"]] });
     const availableCapital = capitalAccount ? Number(capitalAccount.CurrentCash || 0) : 0;
     const trends = await getMexicoTrends(categoryId);
-    const selected = trends.slice(0, Math.min(Math.max(maxTrends, 1), 30));
+    const totalDiscoveryBudget = Math.min(Math.max(maxTrends, 8), 30);
+    const seasonalSeeds = getMexicoSeasonDiscoverySeeds(new Date(), Math.min(8, Math.max(4, Math.floor(totalDiscoveryBudget * 0.4))));
+    const trendBudget = Math.max(4, totalDiscoveryBudget - seasonalSeeds.length);
+    const selectedTrends = trends.slice(0, trendBudget);
+
+    const discoveryInputs = [
+      ...seasonalSeeds.map((seed) => ({ keyword: seed.query, sourceType: "SEASONAL_SEED" as const, sourceSeason: seed.season, sourceScore: seed.score, daysToPeak: seed.daysToPeak })),
+      ...selectedTrends.map((trend) => ({ keyword: trend.keyword, sourceType: "MELI_TREND" as const, sourceSeason: null, sourceScore: null, daysToPeak: null })),
+    ];
+
     const results: any[] = [];
     const researchedProductIds = new Set<string>();
     const validatedCandidates: RadarCandidate[] = [];
     let concreteProductsFound = 0;
     let researched = 0;
-    let skippedNoPrice = 0;
+    let researching = 0;
 
-    for (let index = 0; index < selected.length; index += 1) {
-      const trend = selected[index];
-      if (!trend?.keyword) continue;
+    for (let index = 0; index < discoveryInputs.length; index += 1) {
+      const input = discoveryInputs[index];
+      if (!input.keyword) continue;
 
       try {
-        const products = await discoverConcreteProducts(trend.keyword);
+        const products = await discoverConcreteProducts(input.keyword, { sourceType: input.sourceType, sourceSeason: input.sourceSeason, sourceScore: input.sourceScore });
         concreteProductsFound += products.length;
         if (!products.length) {
-          results.push({ sourceTrend: trend.keyword, status: "SKIPPED", result: "NO_CONCRETE_PRODUCT_FOUND" });
+          results.push({ sourceTrend: input.keyword, sourceType: input.sourceType, sourceSeason: input.sourceSeason, status: "SKIPPED", result: "NO_CONCRETE_PRODUCT_FOUND" });
           continue;
         }
 
@@ -95,33 +105,36 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
           researched += 1;
 
           try {
-            const result = await createCandidateFromDiscoveredProduct(product, index, selected.length);
+            const result = await createCandidateFromDiscoveredProduct(product, index, discoveryInputs.length);
             results.push(result.research);
             if (result.candidate) validatedCandidates.push(result.candidate);
-            else skippedNoPrice += 1;
+            else researching += 1;
           } catch (error: any) {
             console.warn("[AUTO DISCOVERY] product research failed", product.title, error?.message || error);
-            results.push({ keyword: product.title, sourceTrend: trend.keyword, status: "FAILED", result: "RESEARCH_FAILED", missingReason: error?.message || "UNKNOWN_ERROR" });
+            results.push({ keyword: product.title, sourceTrend: input.keyword, sourceType: input.sourceType, sourceSeason: input.sourceSeason, status: "FAILED", result: "RESEARCH_FAILED", missingReason: error?.message || "UNKNOWN_ERROR" });
           }
         }
       } catch (error: any) {
-        console.warn("[AUTO DISCOVERY] trend expansion failed", trend.keyword, error?.message || error);
-        results.push({ sourceTrend: trend.keyword, status: "FAILED", result: "DISCOVERY_FAILED", missingReason: error?.message || "UNKNOWN_ERROR" });
+        console.warn("[AUTO DISCOVERY] discovery input failed", input.keyword, error?.message || error);
+        results.push({ sourceTrend: input.keyword, sourceType: input.sourceType, sourceSeason: input.sourceSeason, status: "FAILED", result: "DISCOVERY_FAILED", missingReason: error?.message || "UNKNOWN_ERROR" });
       }
     }
 
     validatedCandidates.sort((a, b) => Number(b.MarketScore) - Number(a.MarketScore) || Number(b.ConfidenceScore) - Number(a.ConfidenceScore));
-    const shortlist = validatedCandidates.filter((candidate) => Number(candidate.MarketScore) >= 60).slice(0, 5);
+    const shortlist = validatedCandidates.filter((candidate) => Number(candidate.ConfidenceScore) >= 70 && Number((candidate.Evidence as any)?.marketPriceSamples || 0) >= 3 && Number(candidate.MarketScore) >= 60).slice(0, 5);
     const sourcingResults = [];
     for (const candidate of shortlist) sourcingResults.push({ candidateId: candidate.ID_RadarCandidate, title: candidate.Title, ...(await enrichWithSupplierResearch(candidate, availableCapital)) });
 
     const summary = {
       trendsFound: trends.length,
-      trendsAnalyzed: selected.length,
+      trendQueriesAnalyzed: selectedTrends.length,
+      seasonalQueriesAnalyzed: seasonalSeeds.length,
+      seasonalQueries: seasonalSeeds,
+      discoveryQueriesAnalyzed: discoveryInputs.length,
       concreteProductsFound,
       productsResearched: researched,
       validatedMarketCandidates: validatedCandidates.length,
-      skippedWithoutReliableMarketPrice: skippedNoPrice,
+      researchingCandidates: researching,
       sourcingShortlist: shortlist.length,
       availableCapital,
       failed: results.filter((row) => row.status === "FAILED").length,
@@ -129,7 +142,7 @@ export async function runMercadoLibreDiscovery(categoryId?: string, maxTrends = 
       sourcingResults,
     };
 
-    await run.update({ Status: "COMPLETED", TrendsFound: trends.length, TrendsAnalyzed: selected.length, CatalogMatches: researched, WithMarketPrice: validatedCandidates.length, CandidatesCreated: validatedCandidates.length, CandidatesWithoutPrice: skippedNoPrice, Summary: summary, FinishedAt: new Date() });
+    await run.update({ Status: "COMPLETED", TrendsFound: trends.length, TrendsAnalyzed: discoveryInputs.length, CatalogMatches: researched, WithMarketPrice: validatedCandidates.length, CandidatesCreated: validatedCandidates.length, CandidatesWithoutPrice: researching, Summary: summary, FinishedAt: new Date() });
     return { run, summary };
   } catch (error: any) {
     await run.update({ Status: "FAILED", ErrorMessage: error?.message || "Discovery failed", FinishedAt: new Date() });
