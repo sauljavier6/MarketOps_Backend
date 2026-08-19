@@ -1,2 +1,17 @@
-export function calculateMarketScore(i:any){const c=100-Number(i.competitionScore||0);return Math.max(0,Math.min(100,Math.round(Number(i.demandScore||0)*.35+c*.20+Number(i.seasonalScore||0)*.25+Number(i.trendScore||0)*.20)));}
-export function getCandidateStatus(score:number){return score>=78?"SOURCING":score>=58?"DISCOVERED":"REJECTED";}
+export function calculateMarketScore(i: any) {
+  const demand = Number(i.demandScore || 0);
+  const competitionOpportunity = 100 - Number(i.competitionScore || 0);
+  const seasonal = Number(i.seasonalScore ?? 50);
+  const trend = Number(i.trendScore || 0);
+  const confidence = Number(i.confidenceScore ?? 0);
+
+  const base = demand * 0.35 + competitionOpportunity * 0.2 + seasonal * 0.2 + trend * 0.15 + confidence * 0.1;
+  return Math.max(0, Math.min(100, Math.round(base)));
+}
+
+export function getCandidateStatus(score: number, confidence = 0, hasMarketPrice = false) {
+  if (!hasMarketPrice || confidence < 55) return "RESEARCH_REQUIRED";
+  if (score >= 78 && confidence >= 70) return "SOURCING";
+  if (score >= 62) return "VALIDATED";
+  return "REJECTED";
+}
