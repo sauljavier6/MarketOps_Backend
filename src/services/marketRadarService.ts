@@ -10,8 +10,8 @@ export function calculateMarketScore(i: any) {
 }
 
 export function getCandidateStatus(score: number, confidence = 0, hasMarketPrice = false) {
-  if (!hasMarketPrice || confidence < 55) return "RESEARCH_REQUIRED";
-  if (score >= 78 && confidence >= 70) return "SOURCING";
+  if (!hasMarketPrice || confidence < 70) return "RESEARCHING";
+  if (score >= 78) return "SOURCING";
   if (score >= 62) return "VALIDATED";
   return "REJECTED";
 }
