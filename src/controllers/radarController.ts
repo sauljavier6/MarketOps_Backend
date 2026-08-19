@@ -11,12 +11,14 @@ export async function discoverCandidate(req: Request, res: Response) {
   const d = req.body;
   if (!d.title || d.estimatedSalePrice == null) return res.status(400).json({ error: "title and estimatedSalePrice are required" });
   const score = calculateMarketScore({ ...d, confidenceScore: 100 });
-  const row = await RadarCandidate.create({ Title: d.title, Season: d.season || null, EstimatedSalePrice: Number(d.estimatedSalePrice), EstimatedMarketplaceFee: Number(d.estimatedMarketplaceFee || 0), EstimatedShippingCost: Number(d.estimatedShippingCost || 0), PackagingCost: Number(d.packagingCost || 0), DemandScore: Number(d.demandScore || 50), CompetitionScore: Number(d.competitionScore || 50), SeasonalScore: Number(d.seasonalScore || 50), TrendScore: Number(d.trendScore || 50), MarketScore: score, ConfidenceScore: 100, Status: getCandidateStatus(score, 100, true), Evidence: { source: "MANUAL", dataClassification: "USER_PROVIDED" } });
+  const row = await RadarCandidate.create({ Title: d.title, Season: d.season || null, EstimatedSalePrice: Number(d.estimatedSalePrice), EstimatedMarketplaceFee: Number(d.estimatedMarketplaceFee || 0), EstimatedShippingCost: Number(d.estimatedShippingCost || 0), PackagingCost: Number(d.packagingCost || 0), DemandScore: Number(d.demandScore || 50), CompetitionScore: Number(d.competitionScore || 50), SeasonalScore: Number(d.seasonalScore || 50), TrendScore: Number(d.trendScore || 50), MarketScore: score, ConfidenceScore: 100, Status: getCandidateStatus(score, 100, true), Evidence: { source: "MANUAL", sourceStrategy: "MANUAL", dataClassification: "USER_PROVIDED", decision: "RESEARCH" } });
   res.status(201).json(row);
 }
 
 export async function getRadarCandidates(_req: Request, res: Response) {
-  res.json(await RadarCandidate.findAll({ where: { Status: { [Op.notIn]: ["ARCHIVED", "REJECTED", "RESEARCH_REQUIRED"] } }, order: [["MarketScore", "DESC"], ["ConfidenceScore", "DESC"]], limit: 20 }));
+  const rows = await RadarCandidate.findAll({ where: { Status: { [Op.notIn]: ["ARCHIVED", "REJECTED", "RESEARCH_REQUIRED"] } }, limit: 100 });
+  rows.sort((a, b) => Number((b.Evidence as any)?.scoring?.InvestmentScore || b.MarketScore || 0) - Number((a.Evidence as any)?.scoring?.InvestmentScore || a.MarketScore || 0) || Number(b.ConfidenceScore || 0) - Number(a.ConfidenceScore || 0));
+  res.json(rows.slice(0, 30));
 }
 
 export async function addSupplierOffer(req: Request, res: Response) {
@@ -35,8 +37,7 @@ export async function recommendInvestment(req: Request, res: Response) {
   if (!d.title || d.marketScore == null || d.estimatedSalePrice == null) return res.status(400).json({ error: "title, marketScore and estimatedSalePrice are required" });
   const capitalAccount = await CapitalAccount.findOne({ order: [["ID_CapitalAccount", "ASC"]] });
   if (!capitalAccount) return res.status(409).json({ error: "Capital account is not configured" });
-  const capital = Number(capitalAccount.CurrentCash || 0);
-  const result = buildInvestmentRecommendation({ ...d, availableCapital: capital });
+  const result = buildInvestmentRecommendation({ ...d, availableCapital: Number(capitalAccount.CurrentCash || 0) });
   const saved = await InvestmentRecommendation.create({ ProductTitle: d.title, SupplierName: result.bestSupplier?.supplierName || null, UnitLandedCost: result.bestSupplier?.landedUnitCost || 0, EstimatedSalePrice: Number(d.estimatedSalePrice), EstimatedProfitPerUnit: result.estimatedProfitPerUnit, RecommendedQuantity: result.recommendedQuantity, RecommendedInvestment: result.recommendedInvestment, Score: result.score, Decision: result.decision, Reason: result.reason });
   res.json({ ...result, recommendationId: saved.ID_InvestmentRecommendation });
 }
