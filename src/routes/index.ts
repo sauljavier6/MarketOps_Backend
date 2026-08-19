@@ -6,7 +6,7 @@ import { getCapitalSummary, updateCapitalBudget } from "../controllers/capitalCo
 import { getInventory, getInventoryMovements } from "../controllers/inventoryController";
 import { createProduct, createSupplier, deactivateProduct, getProducts, getSuppliers, updateProduct } from "../controllers/catalogController";
 import { getListings, getMercadoLibreAuthUrl, getMercadoLibreStatus, mercadoLibreCallback, mercadoLibreWebhook, pauseListingController, publishListing, refreshMercadoLibreProfile, setListingStock } from "../controllers/mercadoLibreController";
-import { addSupplierOffer, discoverCandidate, getRadarCandidates, getRecommendations, getSupplierOffers, recommendInvestment, setSellingCosts } from "../controllers/radarController";
+import { addSupplierOffer, deepResearchCandidate, discoverCandidate, getRadarCandidates, getRecommendations, getSupplierOffers, recommendInvestment, setSellingCosts } from "../controllers/radarController";
 import { getCommercialCalendarController, getDataSourceStatus, getDiscoveryRuns, getMarketSnapshots, startAutoDiscovery } from "../controllers/autoDiscoveryController";
 import { convertLeadToOffer, getSupplierDiscoveryStatus, getSupplierLeads, runSupplierDiscovery, updateSupplierLead } from "../controllers/supplierDiscoveryController";
 import { generatePortfolio, getPortfolios } from "../controllers/portfolioController";
@@ -41,6 +41,7 @@ apiRouter.put("/marketplaces/mercadolibre/listings/:listingId/stock", setListing
 apiRouter.post("/marketplaces/mercadolibre/listings/:listingId/pause", pauseListingController);
 apiRouter.get("/radar/candidates", getRadarCandidates);
 apiRouter.post("/radar/candidates", discoverCandidate);
+apiRouter.post("/radar/candidates/:candidateId/research", deepResearchCandidate);
 apiRouter.patch("/radar/candidates/:candidateId/selling-costs", setSellingCosts);
 apiRouter.get("/radar/supplier-offers", getSupplierOffers);
 apiRouter.post("/radar/supplier-offers", addSupplierOffer);
