@@ -6,8 +6,16 @@ import { evaluateMexicoSeason } from "./seasonEngine";
 
 const API_BASE = "https://api.mercadolibre.com";
 const SITE_ID = "MLM";
-const MIN_MARKET_PRICE_SAMPLES = 3;
-const MIN_MARKET_CONFIDENCE = 70;
+const STRONG_MARKET_PRICE_SAMPLES = 3;
+const STRONG_MARKET_CONFIDENCE = 70;
+
+const GENERIC_DISCOVERY_TERMS = new Set([
+  "de", "del", "la", "el", "los", "las", "para", "con", "sin", "por", "una", "uno",
+  "color", "grande", "pequeno", "pequena", "exterior", "interior", "hogar", "fiesta",
+  "decoracion", "decorativa", "decorativo", "artificial", "kit", "set", "pack", "pieza", "piezas",
+  "luces", "luz", "led", "bluetooth", "usb", "portatil", "recargable", "impermeable", "escolar",
+  "termica", "infantil", "hombre", "mujer", "auto", "casa", "nuevo", "nueva"
+]);
 
 type Trend = { keyword: string; url?: string };
 type CatalogSearchResult = { id?: string; name?: string; status?: string; domain_id?: string };
@@ -33,6 +41,7 @@ export type DiscoveredProduct = {
   sourceType?: "MELI_TREND" | "SEASONAL_SEED";
   sourceSeason?: string | null;
   sourceScore?: number | null;
+  relevanceScore?: number | null;
 };
 
 async function apiGet<T>(path: string, quietStatuses: number[] = []): Promise<T> {
@@ -129,6 +138,25 @@ function removePriceOutliers(values: number[]) {
   return values.filter((value) => value >= med * 0.55 && value <= med * 1.8);
 }
 
+function normalizeText(value: string) {
+  return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function meaningfulTerms(value: string) {
+  return normalizeText(value).split(" ").filter((term) => term.length >= 4 && !GENERIC_DISCOVERY_TERMS.has(term));
+}
+
+function calculateProductRelevance(title: string, keyword: string) {
+  const titleTerms = new Set(meaningfulTerms(title));
+  const queryTerms = [...new Set(meaningfulTerms(keyword))];
+  const fallbackQueryTerms = [...new Set(normalizeText(keyword).split(" ").filter((term) => term.length >= 4 && !["para", "con", "del"].includes(term)))];
+  const terms = queryTerms.length ? queryTerms : fallbackQueryTerms;
+  const matched = terms.filter((term) => titleTerms.has(term));
+  const coverage = terms.length ? matched.length / terms.length : 0;
+  const score = Math.round(Math.min(100, coverage * 80 + Math.min(20, matched.length * 10)));
+  return { score, matchedTerms: matched, queryTerms: terms };
+}
+
 function cleanTitle(value: string) {
   const rawWords = value.replace(/\|\s*0\s*$/i, "").replace(/[,_]+/g, " ").replace(/\s+/g, " ").trim().split(" ");
   const seen = new Map<string, number>();
@@ -143,13 +171,16 @@ function cleanTitle(value: string) {
 }
 
 function isAllowedProduct(title: string, keyword: string) {
-  const text = title.toLowerCase();
+  const text = normalizeText(title);
   const blocked = ["buchanans", "whisky", "whiskey", "tequila", "vodka", "cerveza", "licor", "50ml", "750 ml alcohol"];
-  if (blocked.some((term) => text.includes(term))) return false;
+  if (blocked.some((term) => text.includes(normalizeText(term)))) return false;
   const words = title.match(/\S+/g) || [];
   if (words.length < 3 || title.length < 10) return false;
-  const keyParts = keyword.toLowerCase().split(/\s+/).filter((part) => part.length >= 4);
-  return !keyParts.length || keyParts.some((part) => text.includes(part));
+  const relevance = calculateProductRelevance(title, keyword);
+  if (!relevance.queryTerms.length) return true;
+  if (!relevance.matchedTerms.length) return false;
+  if (relevance.queryTerms.length >= 3 && relevance.matchedTerms.length < 2) return false;
+  return relevance.score >= 35;
 }
 
 function soldDemandScore(totalSold: number | null) {
@@ -159,7 +190,7 @@ function soldDemandScore(totalSold: number | null) {
 
 export async function discoverConcreteProducts(keyword: string, meta?: { sourceType?: "MELI_TREND" | "SEASONAL_SEED"; sourceSeason?: string | null; sourceScore?: number | null }): Promise<DiscoveredProduct[]> {
   const predicted = await predictCategory(keyword).catch(() => null);
-  const catalog = await searchCatalogProducts(keyword, 12, predicted?.domain_id).catch(async () => searchCatalogProducts(keyword, 12).catch(() => ({ paging: {}, results: [] as CatalogSearchResult[] })));
+  const catalog = await searchCatalogProducts(keyword, 20, predicted?.domain_id).catch(async () => searchCatalogProducts(keyword, 20).catch(() => ({ paging: {}, results: [] as CatalogSearchResult[] })));
   const seen = new Set<string>();
   const products: DiscoveredProduct[] = [];
 
@@ -167,13 +198,14 @@ export async function discoverConcreteProducts(keyword: string, meta?: { sourceT
     if (!row.id || !row.name) continue;
     const title = cleanTitle(row.name);
     if (!isAllowedProduct(title, keyword)) continue;
-    const key = title.toLowerCase();
+    const key = normalizeText(title);
     if (seen.has(key)) continue;
     seen.add(key);
-    products.push({ productId: row.id, title, domainId: row.domain_id || null, sourceTrend: keyword, sourceType: meta?.sourceType || "MELI_TREND", sourceSeason: meta?.sourceSeason || null, sourceScore: meta?.sourceScore ?? null });
-    if (products.length >= 3) break;
+    const relevance = calculateProductRelevance(title, keyword);
+    products.push({ productId: row.id, title, domainId: row.domain_id || null, sourceTrend: keyword, sourceType: meta?.sourceType || "MELI_TREND", sourceSeason: meta?.sourceSeason || null, sourceScore: meta?.sourceScore ?? null, relevanceScore: relevance.score });
+    if (products.length >= 10) break;
   }
-  return products;
+  return products.sort((a, b) => Number(b.relevanceScore || 0) - Number(a.relevanceScore || 0));
 }
 
 export async function analyzeDiscoveredProduct(product: DiscoveredProduct, trendRank: number, totalTrends: number) {
@@ -220,20 +252,16 @@ export async function analyzeDiscoveredProduct(product: DiscoveredProduct, trend
   const categoryId = root.category_id || (await predictCategory(product.title).catch(() => null))?.category_id || null;
   const fee = estimatedSalePrice ? await getListingFee(estimatedSalePrice, categoryId) : null;
   const marketScore = calculateMarketScore({ demandScore, competitionScore, seasonalScore: season.score, trendScore, confidenceScore: confidence });
-  const marketValidated = Boolean(estimatedSalePrice && allPrices.length >= MIN_MARKET_PRICE_SAMPLES && confidence >= MIN_MARKET_CONFIDENCE);
-  const missingReason = !estimatedSalePrice
-    ? "NO_VALIDATED_ML_MARKET_PRICE"
-    : allPrices.length < MIN_MARKET_PRICE_SAMPLES
-      ? "INSUFFICIENT_MARKET_PRICE_SAMPLES"
-      : confidence < MIN_MARKET_CONFIDENCE
-        ? "LOW_EVIDENCE_CONFIDENCE"
-        : null;
+  const marketValidated = Boolean(estimatedSalePrice);
+  const evidenceStrength = !estimatedSalePrice ? "NONE" : allPrices.length >= STRONG_MARKET_PRICE_SAMPLES && confidence >= STRONG_MARKET_CONFIDENCE ? "STRONG" : allPrices.length >= 2 ? "MEDIUM" : "LOW";
+  const missingReason = estimatedSalePrice ? null : "NO_ACTIVE_MARKET_PRICE";
 
   const evidence = {
-    evidenceVersion: 11,
+    evidenceVersion: 12,
     sourceTrend: product.sourceTrend,
     sourceType: product.sourceType || "MELI_TREND",
     sourceSeason: product.sourceSeason || null,
+    sourceRelevanceScore: product.relevanceScore ?? null,
     trendRank: product.sourceType === "MELI_TREND" ? trendRank + 1 : null,
     catalogProductId: product.productId,
     domainId: root.domain_id || product.domainId || null,
@@ -243,12 +271,13 @@ export async function analyzeDiscoveredProduct(product: DiscoveredProduct, trend
     uniqueSellerCount: sellerCount,
     soldQuantitySampleTotal: totalSold,
     marketPriceSamples: allPrices.length,
-    validationRules: { minMarketPriceSamples: MIN_MARKET_PRICE_SAMPLES, minConfidence: MIN_MARKET_CONFIDENCE },
+    evidenceStrength,
+    validationRules: { oneRealMlPriceEnoughToEnterRadar: true, strongEvidenceSamples: STRONG_MARKET_PRICE_SAMPLES, strongConfidence: STRONG_MARKET_CONFIDENCE },
     priceSource: allPrices.length ? "MERCADOLIBRE_CATALOG_WINNER_AND_PDP" : null,
     priceRange: allPrices.length ? { min: Math.min(...allPrices), p25: percentile(allPrices, 0.25), median: median(allPrices), p75: percentile(allPrices, 0.75), max: Math.max(...allPrices), samples: allPrices.length } : null,
     fee,
     season,
-    result: marketValidated ? "MARKET_VALIDATED" : "RESEARCH_INCOMPLETE",
+    result: estimatedSalePrice ? `MARKET_PRICE_FOUND_${evidenceStrength}_EVIDENCE` : "RESEARCH_INCOMPLETE",
     missingReason,
     dataClassification: {
       marketPrices: allPrices.length ? "REAL_DATA" : "UNAVAILABLE_DATA",
