@@ -7,73 +7,59 @@ import { getInventory, getInventoryMovements } from "../controllers/inventoryCon
 import { createProduct, createSupplier, deactivateProduct, getProducts, getSuppliers, updateProduct } from "../controllers/catalogController";
 import { getListings, getMercadoLibreAuthUrl, getMercadoLibreStatus, mercadoLibreCallback, mercadoLibreWebhook, pauseListingController, publishListing, refreshMercadoLibreProfile, setListingStock } from "../controllers/mercadoLibreController";
 import { addSupplierOffer, discoverCandidate, getRadarCandidates, getRecommendations, getSupplierOffers, recommendInvestment } from "../controllers/radarController";
-import { getDataSourceStatus, getDiscoveryRuns, getMarketSnapshots, startAutoDiscovery } from "../controllers/autoDiscoveryController";
+import { getCommercialCalendarController, getDataSourceStatus, getDiscoveryRuns, getMarketSnapshots, startAutoDiscovery } from "../controllers/autoDiscoveryController";
 import { convertLeadToOffer, getSupplierDiscoveryStatus, getSupplierLeads, runSupplierDiscovery, updateSupplierLead } from "../controllers/supplierDiscoveryController";
 import { generatePortfolio, getPortfolios } from "../controllers/portfolioController";
 import { evaluateAllReplenishment, evaluateProductReplenishment, getReplenishmentHistory } from "../controllers/replenishmentController";
 import { evaluateAllLearning, evaluateProductLearning, getLearningOutcomes } from "../controllers/learningController";
 
 export const apiRouter = Router();
-
 apiRouter.get("/dashboard", getDashboard);
-
 apiRouter.get("/capital", getCapitalSummary);
 apiRouter.patch("/capital", updateCapitalBudget);
-
 apiRouter.get("/opportunities", getOpportunities);
 apiRouter.post("/opportunities/analyze", analyzeOpportunity);
-
 apiRouter.get("/products", getProducts);
 apiRouter.post("/products", createProduct);
 apiRouter.patch("/products/:productId", updateProduct);
 apiRouter.delete("/products/:productId", deactivateProduct);
-
 apiRouter.get("/suppliers", getSuppliers);
 apiRouter.post("/suppliers", createSupplier);
-
 apiRouter.get("/purchases", getPurchases);
 apiRouter.post("/purchases", createPurchase);
 apiRouter.post("/purchases/:purchaseId/receive", receivePurchaseController);
-
 apiRouter.get("/inventory", getInventory);
 apiRouter.get("/inventory/movements", getInventoryMovements);
-
 apiRouter.get("/marketplaces/mercadolibre/status", getMercadoLibreStatus);
 apiRouter.get("/marketplaces/mercadolibre/auth-url", getMercadoLibreAuthUrl);
 apiRouter.get("/marketplaces/mercadolibre/callback", mercadoLibreCallback);
 apiRouter.post("/marketplaces/mercadolibre/profile/refresh", refreshMercadoLibreProfile);
 apiRouter.post("/marketplaces/mercadolibre/webhook", mercadoLibreWebhook);
-
 apiRouter.get("/marketplaces/mercadolibre/listings", getListings);
 apiRouter.post("/marketplaces/mercadolibre/listings", publishListing);
 apiRouter.put("/marketplaces/mercadolibre/listings/:listingId/stock", setListingStock);
 apiRouter.post("/marketplaces/mercadolibre/listings/:listingId/pause", pauseListingController);
-
 apiRouter.get("/radar/candidates", getRadarCandidates);
 apiRouter.post("/radar/candidates", discoverCandidate);
 apiRouter.get("/radar/supplier-offers", getSupplierOffers);
 apiRouter.post("/radar/supplier-offers", addSupplierOffer);
 apiRouter.post("/radar/recommend", recommendInvestment);
 apiRouter.get("/radar/recommendations", getRecommendations);
-
 apiRouter.get("/radar/data-sources", getDataSourceStatus);
+apiRouter.get("/radar/commercial-calendar", getCommercialCalendarController);
 apiRouter.post("/radar/auto-discovery/run", startAutoDiscovery);
 apiRouter.get("/radar/auto-discovery/runs", getDiscoveryRuns);
 apiRouter.get("/radar/snapshots", getMarketSnapshots);
-
 apiRouter.get("/radar/supplier-discovery/status", getSupplierDiscoveryStatus);
 apiRouter.post("/radar/supplier-discovery/run", runSupplierDiscovery);
 apiRouter.get("/radar/supplier-leads", getSupplierLeads);
 apiRouter.patch("/radar/supplier-leads/:leadId", updateSupplierLead);
 apiRouter.post("/radar/supplier-leads/:leadId/convert-to-offer", convertLeadToOffer);
-
 apiRouter.post("/portfolio/generate", generatePortfolio);
 apiRouter.get("/portfolio", getPortfolios);
-
 apiRouter.post("/replenishment/evaluate-all", evaluateAllReplenishment);
 apiRouter.post("/replenishment/products/:productId/evaluate", evaluateProductReplenishment);
 apiRouter.get("/replenishment/history", getReplenishmentHistory);
-
 apiRouter.post("/learning/evaluate-all", evaluateAllLearning);
 apiRouter.post("/learning/products/:productId/evaluate", evaluateProductLearning);
 apiRouter.get("/learning/outcomes", getLearningOutcomes);
