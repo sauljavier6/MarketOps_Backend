@@ -12,15 +12,13 @@ export type EconomicsInput = {
 };
 
 export function calculateUnitEconomics(input: EconomicsInput) {
-  const requiredKnown = input.salePrice != null && input.supplierPrice != null && input.mercadoLibreFee != null;
-  if (!requiredKnown) return { ready: false, landedCost: null, unitProfit: null, netMarginPct: null, roiPct: null, missing: [input.salePrice == null ? "SALE_PRICE" : null, input.supplierPrice == null ? "SUPPLIER_PRICE" : null, input.mercadoLibreFee == null ? "MARKETPLACE_FEE" : null].filter(Boolean) };
+  const missing = [input.salePrice == null ? "SALE_PRICE" : null, input.supplierPrice == null ? "SUPPLIER_PRICE" : null, input.mercadoLibreFee == null ? "MARKETPLACE_FEE" : null, input.mercadoLibreShipping == null ? "MARKETPLACE_SHIPPING" : null, input.packagingCost == null ? "PACKAGING_COST" : null].filter((value): value is string => Boolean(value));
+  if (missing.length) return { ready: false, landedCost: null, unitProfit: null, netMarginPct: null, roiPct: null, missing };
   const purchaseShipping = input.purchaseShippingPerUnit ?? 0;
   const otherPurchase = input.otherPurchaseCostsPerUnit ?? 0;
-  const mlShipping = input.mercadoLibreShipping ?? 0;
-  const packaging = input.packagingCost ?? 0;
   const otherSelling = input.otherSellingCosts ?? 0;
   const landedCost = Number((Number(input.supplierPrice) + purchaseShipping + otherPurchase).toFixed(2));
-  const unitProfit = Number((Number(input.salePrice) - landedCost - Number(input.mercadoLibreFee) - mlShipping - packaging - otherSelling).toFixed(2));
+  const unitProfit = Number((Number(input.salePrice) - landedCost - Number(input.mercadoLibreFee) - Number(input.mercadoLibreShipping) - Number(input.packagingCost) - otherSelling).toFixed(2));
   const netMarginPct = Number((unitProfit / Number(input.salePrice) * 100).toFixed(2));
   const roiPct = landedCost > 0 ? Number((unitProfit / landedCost * 100).toFixed(2)) : null;
   return { ready: true, landedCost, unitProfit, netMarginPct, roiPct, missing: [] as string[] };
@@ -56,6 +54,7 @@ export function evaluateInvestment(input: {
   economics: ReturnType<typeof calculateUnitEconomics>;
   capital: number;
   supplierVerified: boolean;
+  marketPriceVerified?: boolean;
   maxUnitCostPercentOfCapital?: number;
   minimumExpectedMargin?: number;
   minimumROI?: number;
@@ -69,7 +68,7 @@ export function evaluateInvestment(input: {
     concreteProduct: true,
     demandReason: Boolean(input.opportunity || input.demandScore >= 50),
     timingAdequate: input.timingStatus !== "TOO_LATE",
-    marketPriceVerified: input.economics.ready || input.economics.missing?.includes("SUPPLIER_PRICE"),
+    marketPriceVerified: Boolean(input.marketPriceVerified),
     supplierVerified: input.supplierVerified,
     economicsReady: input.economics.ready,
     capitalFit: capitalFitScore >= 50,
@@ -82,11 +81,10 @@ export function evaluateInvestment(input: {
   let decision: "RESEARCH" | "BUY" | "TEST" | "WATCH" | "REJECT" | "TOO_LATE" = "RESEARCH";
   let reason = "Faltan datos para cerrar la decisión.";
   if (input.timingStatus === "TOO_LATE") { decision = "TOO_LATE"; reason = "El inventario no llegaría con margen suficiente antes del inicio de demanda."; }
-  else if (!input.supplierVerified || !input.economics.ready) { decision = "RESEARCH"; reason = "Mercado identificado; falta validar proveedor, costo completo y/o logística."; }
+  else if (!qualityGates.marketPriceVerified || !input.supplierVerified || !input.economics.ready) { decision = "RESEARCH"; reason = "La oportunidad sigue en investigación porque falta validar mercado, proveedor o costos completos."; }
   else if (!qualityGates.capitalFit || !qualityGates.minimumMargin || !qualityGates.minimumROI) { decision = "REJECT"; reason = "No cumple capital, margen o ROI mínimo."; }
   else if (investmentScore >= 80 && Object.values(qualityGates).every(Boolean)) { decision = "BUY"; reason = "Timing, mercado, proveedor, economía y capital cumplen los filtros de compra."; }
   else if (investmentScore >= 68) { decision = "TEST"; reason = "Tiene potencial, pero conviene una compra piloto controlada."; }
   else { decision = "WATCH"; reason = "La oportunidad existe, pero el balance riesgo/retorno todavía no es suficientemente atractivo."; }
-
   return { decision, reason, investmentScore, marginScore, capitalFitScore, riskScore, qualityGates };
 }
