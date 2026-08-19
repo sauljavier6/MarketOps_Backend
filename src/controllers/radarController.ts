@@ -4,6 +4,7 @@ import CapitalAccount from "../models/CapitalAccount";
 import InvestmentRecommendation from "../models/InvestmentRecommendation";
 import RadarCandidate from "../models/RadarCandidate";
 import SupplierOffer from "../models/SupplierOffer";
+import { finalizeCandidateDecision } from "../services/candidateDecisionService";
 import { buildInvestmentRecommendation } from "../services/investmentEngine";
 import { calculateMarketScore, getCandidateStatus } from "../services/marketRadarService";
 
@@ -17,8 +18,28 @@ export async function discoverCandidate(req: Request, res: Response) {
 
 export async function getRadarCandidates(_req: Request, res: Response) {
   const rows = await RadarCandidate.findAll({ where: { Status: { [Op.notIn]: ["ARCHIVED", "REJECTED", "RESEARCH_REQUIRED"] } }, limit: 100 });
-  rows.sort((a, b) => Number((b.Evidence as any)?.scoring?.InvestmentScore || b.MarketScore || 0) - Number((a.Evidence as any)?.scoring?.InvestmentScore || a.MarketScore || 0) || Number(b.ConfidenceScore || 0) - Number(a.ConfidenceScore || 0));
+  rows.sort((a, b) => {
+    const aPrice = Number(a.EstimatedSalePrice || 0) > 0 ? 1 : 0;
+    const bPrice = Number(b.EstimatedSalePrice || 0) > 0 ? 1 : 0;
+    if (aPrice !== bPrice) return bPrice - aPrice;
+    return Number((b.Evidence as any)?.scoring?.InvestmentScore || b.MarketScore || 0) - Number((a.Evidence as any)?.scoring?.InvestmentScore || a.MarketScore || 0) || Number(b.ConfidenceScore || 0) - Number(a.ConfidenceScore || 0);
+  });
   res.json(rows.slice(0, 30));
+}
+
+export async function setSellingCosts(req: Request, res: Response) {
+  const candidateId = Number(req.params.candidateId);
+  const candidate = await RadarCandidate.findByPk(candidateId);
+  if (!candidate) return res.status(404).json({ error: "Radar candidate not found" });
+  const d = req.body || {};
+  const fields = ["marketplaceShipping", "packagingCost", "otherSellingCosts"];
+  for (const field of fields) if (d[field] == null || !Number.isFinite(Number(d[field])) || Number(d[field]) < 0) return res.status(400).json({ error: `${field} must be a non-negative number` });
+  const evidence: any = candidate.Evidence || {};
+  evidence.sellingCosts = { verified: true, marketplaceShipping: Number(d.marketplaceShipping), packagingCost: Number(d.packagingCost), otherSellingCosts: Number(d.otherSellingCosts), verifiedAt: new Date().toISOString(), source: String(d.source || "USER_VERIFIED") };
+  evidence.decision = "RESEARCH";
+  evidence.decisionReason = "Costos de venta actualizados; recalcula la decisión final con el proveedor verificado.";
+  await candidate.update({ Evidence: evidence, EstimatedShippingCost: Number(d.marketplaceShipping), PackagingCost: Number(d.packagingCost) });
+  res.json(candidate);
 }
 
 export async function addSupplierOffer(req: Request, res: Response) {
@@ -33,8 +54,15 @@ export async function getSupplierOffers(req: Request, res: Response) {
 }
 
 export async function recommendInvestment(req: Request, res: Response) {
-  const d = req.body;
-  if (!d.title || d.marketScore == null || d.estimatedSalePrice == null) return res.status(400).json({ error: "title, marketScore and estimatedSalePrice are required" });
+  const d = req.body || {};
+  if (d.candidateId != null) {
+    try {
+      return res.json(await finalizeCandidateDecision(Number(d.candidateId)));
+    } catch (error: any) {
+      return res.status(409).json({ error: error?.message || "Unable to finalize candidate decision" });
+    }
+  }
+  if (!d.title || d.marketScore == null || d.estimatedSalePrice == null) return res.status(400).json({ error: "candidateId or title/marketScore/estimatedSalePrice are required" });
   const capitalAccount = await CapitalAccount.findOne({ order: [["ID_CapitalAccount", "ASC"]] });
   if (!capitalAccount) return res.status(409).json({ error: "Capital account is not configured" });
   const result = buildInvestmentRecommendation({ ...d, availableCapital: Number(capitalAccount.CurrentCash || 0) });
