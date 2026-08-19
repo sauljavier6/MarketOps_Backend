@@ -20,7 +20,7 @@ export default class MarketplaceAccount extends Model {
   @Column({ type: DataType.DATE, allowNull: false })
   declare AccessTokenExpiresAt: Date;
 
-  @Column({ type: DataType.STRING, allowNull: true })
+  @Column({ type: DataType.TEXT, allowNull: true })
   declare Scope?: string;
 
   @Column({ type: DataType.STRING, allowNull: true })
