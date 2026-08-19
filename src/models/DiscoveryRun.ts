@@ -7,7 +7,12 @@ export default class DiscoveryRun extends Model {
   @Column({ type: DataType.STRING, allowNull: false, defaultValue: "PENDING" }) declare Status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
   @Column({ type: DataType.STRING, allowNull: true }) declare CategoryId?: string;
   @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 }) declare TrendsFound: number;
+  @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 }) declare TrendsAnalyzed: number;
+  @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 }) declare CatalogMatches: number;
+  @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 }) declare WithMarketPrice: number;
   @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 }) declare CandidatesCreated: number;
+  @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 }) declare CandidatesWithoutPrice: number;
+  @Column({ type: DataType.JSONB, allowNull: true }) declare Summary?: object;
   @Column({ type: DataType.TEXT, allowNull: true }) declare ErrorMessage?: string;
   @Column({ type: DataType.DATE, allowNull: true }) declare StartedAt?: Date;
   @Column({ type: DataType.DATE, allowNull: true }) declare FinishedAt?: Date;
