@@ -6,7 +6,6 @@ import SupplierOffer from "../models/SupplierOffer";
 import { calculateTiming, EVERGREEN_HYPOTHESES, getCommercialCalendar, getSeasonDiscoveryPlan, type CommercialOpportunity } from "./commercialCalendarService";
 import { analyzeDiscoveredProduct, discoverConcreteProducts, getMexicoTrends } from "./mercadoLibreResearchService";
 import { calculateUnitEconomics, evaluateInvestment } from "./seasonFirstDecisionService";
-import { discoverSupplierLeads } from "./supplierAutoDiscoveryService";
 
 const STRATEGY = {
   seasonalWeight: 0.70,
@@ -24,13 +23,6 @@ const STRATEGY = {
   preparationDays: 3,
   safetyBufferDays: 7,
 };
-
-function median(values: number[]) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
-}
 
 function normalize(value: string) {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
@@ -163,40 +155,33 @@ async function enrichCandidate(candidate: RadarCandidate, availableCapital: numb
   const salePrice = Number(candidate.EstimatedSalePrice || 0) || null;
   if (!salePrice) return { candidateId: candidate.ID_RadarCandidate, decision: "RESEARCH", reason: "NO_ACTIVE_MARKET_PRICE" };
 
-  const brave = await discoverSupplierLeads(candidate.Title, 6).catch(() => ({ leads: [] as any[] }));
-  const plausible = brave.leads.filter((lead: any) => lead.PriceHint != null).map((lead: any) => ({ lead, price: Number(lead.PriceHint) })).filter((row: any) => Number.isFinite(row.price) && row.price > salePrice * 0.05 && row.price < salePrice * 0.82).sort((a: any, b: any) => Number(b.lead.LeadScore) - Number(a.lead.LeadScore));
-  const estimatedPurchasePrice = plausible.length ? Number(median(plausible.map((row: any) => row.price)).toFixed(2)) : null;
-
   const verifiedOffer = await SupplierOffer.findOne({ where: { ProductQuery: candidate.Title, State: true }, order: [["updatedAt", "DESC"]] });
   const supplierVerified = Boolean(verifiedOffer);
-  const supplierPrice = verifiedOffer ? Number(verifiedOffer.UnitPrice) : estimatedPurchasePrice;
+  const supplierPrice = verifiedOffer ? Number(verifiedOffer.UnitPrice) : null;
   const supplierLeadTime = verifiedOffer?.DeliveryDays == null ? null : Number(verifiedOffer.DeliveryDays);
-  const supplierScore = verifiedOffer ? Math.max(0, Math.min(100, Math.round(Number(verifiedOffer.ReliabilityScore || 50) * 0.7 + (supplierLeadTime == null ? 40 : Math.max(0, 100 - supplierLeadTime * 2)) * 0.3))) : plausible.length ? Math.round(plausible.slice(0, 3).reduce((sum: number, row: any) => sum + Number(row.lead.LeadScore || 0), 0) / Math.min(3, plausible.length)) : null;
+  const supplierScore = verifiedOffer ? Math.max(0, Math.min(100, Math.round(Number(verifiedOffer.ReliabilityScore || 50) * 0.7 + (supplierLeadTime == null ? 40 : Math.max(0, 100 - supplierLeadTime * 2)) * 0.3))) : null;
 
   const timing = calculateTiming(opportunity, supplierLeadTime, STRATEGY.preparationDays, STRATEGY.safetyBufferDays);
-  const preliminaryProfit = supplierPrice == null ? null : Number((salePrice - supplierPrice - Number(candidate.EstimatedMarketplaceFee || 0)).toFixed(2));
-  const preliminaryMargin = preliminaryProfit == null ? null : Number((preliminaryProfit / salePrice * 100).toFixed(2));
   const sellingCosts = evidence.sellingCosts || null;
-
-  const economics = calculateUnitEconomics({ salePrice, supplierPrice: verifiedOffer ? supplierPrice : null, purchaseShippingPerUnit: verifiedOffer ? Number(verifiedOffer.ShippingCost || 0) / Math.max(1, Number(verifiedOffer.MOQ || 1)) : null, otherPurchaseCostsPerUnit: verifiedOffer ? Number(verifiedOffer.ImportCost || 0) / Math.max(1, Number(verifiedOffer.MOQ || 1)) : null, mercadoLibreFee: Number(candidate.EstimatedMarketplaceFee || 0), mercadoLibreShipping: sellingCosts?.verified ? Number(sellingCosts.marketplaceShipping || 0) : null, packagingCost: sellingCosts?.verified ? Number(sellingCosts.packagingCost || 0) : null, otherSellingCosts: sellingCosts?.verified ? Number(sellingCosts.otherSellingCosts || 0) : null });
+  const economics = calculateUnitEconomics({ salePrice, supplierPrice, purchaseShippingPerUnit: verifiedOffer ? Number(verifiedOffer.ShippingCost || 0) / Math.max(1, Number(verifiedOffer.MOQ || 1)) : null, otherPurchaseCostsPerUnit: verifiedOffer ? Number(verifiedOffer.ImportCost || 0) / Math.max(1, Number(verifiedOffer.MOQ || 1)) : null, mercadoLibreFee: Number(candidate.EstimatedMarketplaceFee || 0), mercadoLibreShipping: sellingCosts?.verified ? Number(sellingCosts.marketplaceShipping || 0) : null, packagingCost: sellingCosts?.verified ? Number(sellingCosts.packagingCost || 0) : null, otherSellingCosts: sellingCosts?.verified ? Number(sellingCosts.otherSellingCosts || 0) : null });
   const decision = evaluateInvestment({ opportunity, marketScore: Number(candidate.MarketScore || 0), demandScore: Number(candidate.DemandScore || 0), competitionScore: Number(candidate.CompetitionScore || 0), dataConfidence: Number(candidate.ConfidenceScore || 0), supplierScore, timingScore: timing.timingScore, timingStatus: timing.timingStatus, economics, capital: availableCapital, supplierVerified, marketPriceVerified: Boolean(salePrice), maxUnitCostPercentOfCapital: STRATEGY.maxUnitCostPercentOfCapital, minimumExpectedMargin: STRATEGY.minimumExpectedMargin, minimumROI: STRATEGY.minimumROI });
 
   const maxProductBudget = availableCapital * STRATEGY.maxAllocationPerProduct;
   const recommendedQuantity = economics.ready && economics.landedCost ? Math.max(0, Math.floor(maxProductBudget / economics.landedCost)) : 0;
   const recommendedInvestment = economics.ready && economics.landedCost ? Number((recommendedQuantity * economics.landedCost).toFixed(2)) : 0;
 
-  evidence.sourcing = { provider: "BRAVE_SEARCH", leadsFound: brave.leads.length, estimatedPurchasePrice, supplierVerified, verifiedSupplier: verifiedOffer ? { name: verifiedOffer.SupplierName, unitPrice: Number(verifiedOffer.UnitPrice), moq: Number(verifiedOffer.MOQ), shippingCost: Number(verifiedOffer.ShippingCost), importCost: Number(verifiedOffer.ImportCost), deliveryDays: verifiedOffer.DeliveryDays, reliabilityScore: Number(verifiedOffer.ReliabilityScore) } : null, supplierLeads: plausible.slice(0, 5).map((row: any) => ({ name: row.lead.Name, domain: row.lead.Domain, url: row.lead.Url, leadScore: row.lead.LeadScore, priceHint: row.price })) };
+  evidence.sourcing = { provider: verifiedOffer ? "USER_VERIFIED" : "MANUAL_REQUIRED", leadsFound: 0, estimatedPurchasePrice: supplierPrice, supplierVerified, verifiedSupplier: verifiedOffer ? { name: verifiedOffer.SupplierName, unitPrice: Number(verifiedOffer.UnitPrice), moq: Number(verifiedOffer.MOQ), shippingCost: Number(verifiedOffer.ShippingCost), importCost: Number(verifiedOffer.ImportCost), deliveryDays: verifiedOffer.DeliveryDays, reliabilityScore: Number(verifiedOffer.ReliabilityScore) } : null, supplierLeads: [] };
   evidence.timing = timing;
-  evidence.economics = { ...economics, preliminaryProfitBeforeUnknownSellingCosts: preliminaryProfit, preliminaryMarginBeforeUnknownSellingCosts: preliminaryMargin, note: economics.ready ? null : "No se inventan envío ML, empaque ni otros costos desconocidos; BUY queda bloqueado hasta completar costos verificados." };
+  evidence.economics = { ...economics, note: economics.ready ? null : "La rentabilidad queda pendiente hasta capturar una cotización real del proveedor y los costos de venta verificados." };
   evidence.scoring = { ...(evidence.scoring || {}), SupplierScore: supplierScore, TimingScore: timing.timingScore, MarginScore: decision.marginScore, CapitalFitScore: decision.capitalFitScore, RiskScore: decision.riskScore, DataConfidence: Number(candidate.ConfidenceScore || 0), InvestmentScore: decision.investmentScore };
   evidence.qualityGates = decision.qualityGates;
   evidence.decision = decision.decision;
-  evidence.decisionReason = decision.reason;
+  evidence.decisionReason = supplierVerified ? decision.reason : "El mercado fue validado. Captura una cotización real del proveedor para continuar con la decisión de inversión.";
   evidence.recommendation = { quantity: recommendedQuantity, investment: recommendedInvestment, availableCapital, reserveTarget: Number((availableCapital * STRATEGY.minimumReservePercent).toFixed(2)) };
   evidence.stage = supplierVerified ? (economics.ready ? "DECISION" : "ECONOMICS") : "SOURCING";
 
   await candidate.update({ Evidence: evidence, Status: evidence.stage });
-  return { candidateId: candidate.ID_RadarCandidate, title: candidate.Title, decision: decision.decision, investmentScore: decision.investmentScore, supplierVerified, estimatedPurchasePrice, preliminaryMargin, timingStatus: timing.timingStatus };
+  return { candidateId: candidate.ID_RadarCandidate, title: candidate.Title, decision: evidence.decision, investmentScore: decision.investmentScore, supplierVerified, estimatedPurchasePrice: supplierPrice, timingStatus: timing.timingStatus };
 }
 
 export async function runMercadoLibreDiscovery(categoryId?: string, _maxTrends = 20) {
