@@ -62,9 +62,20 @@ export async function researchCandidateDeep(candidateId: number) {
     reliabilityScore: Number(verifiedOffer.ReliabilityScore),
   } : null;
 
+  const listingEvidence = Array.isArray((market.evidence as any)?.listingEvidence)
+    ? (market.evidence as any).listingEvidence.map((listing: any) => ({
+        ...listing,
+        url: listing.permalink || listing.url || null,
+      }))
+    : [];
+
   const evidence: any = {
     ...previousEvidence,
     ...market.evidence,
+    // Alias de presentación para el frontend. Conservamos los nombres originales
+    // listingEvidence/catalogProductUrl como evidencia técnica persistida.
+    marketplaceListings: listingEvidence,
+    marketplaceProductUrl: (market.evidence as any)?.catalogProductUrl || null,
     sourceStrategy: previousEvidence.sourceStrategy,
     commercialOpportunity: previousEvidence.commercialOpportunity,
     trendValidation: previousEvidence.trendValidation,
@@ -75,6 +86,7 @@ export async function researchCandidateDeep(candidateId: number) {
       supplierSearchCompleted: false,
       supplierSearchMode: "MANUAL_VERIFIED",
       quoteRecommended,
+      marketplaceListingsFound: listingEvidence.length,
     },
     sourcing: {
       provider: verifiedOffer ? "USER_VERIFIED" : "MANUAL_REQUIRED",
