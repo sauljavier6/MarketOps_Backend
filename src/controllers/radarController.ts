@@ -62,40 +62,6 @@ function compareCandidates(a: RadarCandidate, b: RadarCandidate) {
   return Number((b.Evidence as any)?.scoring?.InvestmentScore || b.MarketScore || 0) - Number((a.Evidence as any)?.scoring?.InvestmentScore || a.MarketScore || 0);
 }
 
-function seasonKey(candidate: RadarCandidate) {
-  const evidence: any = candidate.Evidence || {};
-  const opportunity = evidence.commercialOpportunity || {};
-  const season = String(candidate.Season || opportunity.name || "").trim();
-  return season || null;
-}
-
-function selectRadarCandidates(rows: RadarCandidate[], limit = 30) {
-  const sorted = [...rows].sort(compareCandidates);
-  const selected: RadarCandidate[] = [];
-  const selectedIds = new Set<number>();
-  const representedSeasons = new Set<string>();
-
-  // First preserve one strong/urgent candidate from every upcoming commercial season.
-  for (const candidate of sorted) {
-    const season = seasonKey(candidate);
-    if (!season || representedSeasons.has(season) || commercialPriority(candidate) >= 9) continue;
-    selected.push(candidate);
-    selectedIds.add(Number(candidate.ID_RadarCandidate));
-    representedSeasons.add(season);
-  }
-
-  // Fill the remaining slots using the normal commercial-priority ordering.
-  for (const candidate of sorted) {
-    if (selected.length >= limit) break;
-    const id = Number(candidate.ID_RadarCandidate);
-    if (selectedIds.has(id)) continue;
-    selected.push(candidate);
-    selectedIds.add(id);
-  }
-
-  return selected.sort(compareCandidates).slice(0, limit);
-}
-
 export async function discoverCandidate(req: Request, res: Response) {
   const d = req.body;
   if (!d.title || d.estimatedSalePrice == null) return res.status(400).json({ error: "title and estimatedSalePrice are required" });
@@ -105,8 +71,9 @@ export async function discoverCandidate(req: Request, res: Response) {
 }
 
 export async function getRadarCandidates(_req: Request, res: Response) {
-  const rows = await RadarCandidate.findAll({ where: { Status: { [Op.notIn]: ["ARCHIVED", "REJECTED", "RESEARCH_REQUIRED"] } }, limit: 200 });
-  res.json(selectRadarCandidates(rows, 30));
+  const rows = await RadarCandidate.findAll({ where: { Status: { [Op.notIn]: ["ARCHIVED", "REJECTED", "RESEARCH_REQUIRED"] } } });
+  rows.sort(compareCandidates);
+  res.json(rows);
 }
 
 export async function deepResearchCandidate(req: Request, res: Response) {
