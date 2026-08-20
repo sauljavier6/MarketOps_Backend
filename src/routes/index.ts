@@ -10,6 +10,7 @@ import { addSupplierOffer, deepResearchCandidate, discoverCandidate, getRadarCan
 import { getCommercialCalendarController, getDataSourceStatus, getDiscoveryRuns, getMarketSnapshots, startAutoDiscovery } from "../controllers/autoDiscoveryController";
 import { convertLeadToOffer, getSupplierDiscoveryStatus, getSupplierLeads, runSupplierDiscovery, updateSupplierLead } from "../controllers/supplierDiscoveryController";
 import { getSyscomProductsController, getSyscomStatusController } from "../controllers/supplierCatalogController";
+import { getSupplierIntegrations, searchSupplierCatalog } from "../controllers/supplierIntegrationController";
 import { generatePortfolio, getPortfolios } from "../controllers/portfolioController";
 import { evaluateAllReplenishment, evaluateProductReplenishment, getReplenishmentHistory } from "../controllers/replenishmentController";
 import { evaluateAllLearning, evaluateProductLearning, getLearningOutcomes } from "../controllers/learningController";
@@ -26,6 +27,8 @@ apiRouter.patch("/products/:productId", updateProduct);
 apiRouter.delete("/products/:productId", deactivateProduct);
 apiRouter.get("/suppliers", getSuppliers);
 apiRouter.post("/suppliers", createSupplier);
+apiRouter.get("/suppliers/integrations", getSupplierIntegrations);
+apiRouter.get("/suppliers/catalog/search", searchSupplierCatalog);
 apiRouter.get("/suppliers/syscom/status", getSyscomStatusController);
 apiRouter.get("/suppliers/syscom/products", getSyscomProductsController);
 apiRouter.get("/purchases", getPurchases);
