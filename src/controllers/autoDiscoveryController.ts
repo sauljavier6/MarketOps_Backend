@@ -9,12 +9,12 @@ import { getCommercialCalendar } from "../services/commercialCalendarService";
 export async function getDataSourceStatus(_req: Request, res: Response) {
   const account = await MarketplaceAccount.findOne({ where: { Marketplace: "MERCADOLIBRE", State: true }, attributes: ["ID_MarketplaceAccount", "ExternalUserId", "Nickname", "AccessTokenExpiresAt", "State"], order: [["updatedAt", "DESC"]] });
   res.json({ sources: [
-    { id: "commercial_calendar", name: "Commercial Calendar", provider: "MarketOps", status: "READY", dataType: "CONFIGURED", purpose: "Anticipar ventanas comerciales de los próximos 30/60/90/120 días" },
-    { id: "meli_trends", name: "Mercado Libre Trends", provider: "Mercado Libre Official API", status: account ? "READY" : "AUTH_REQUIRED", dataType: "REAL", purpose: "Validar señales de demanda y descubrir oportunidades adicionales" },
-    { id: "meli_catalog_products", name: "Mercado Libre Catalog Research", provider: "Mercado Libre Official API", status: account ? "READY" : "AUTH_REQUIRED", dataType: "REAL", purpose: "Convertir hipótesis en productos concretos y validar precio/competencia" },
-    { id: "meli_listing_prices", name: "Mercado Libre Selling Fees", provider: "Mercado Libre Official API", status: account ? "READY" : "AUTH_REQUIRED", dataType: "REAL", purpose: "Calcular comisión de venta disponible para precio y categoría" },
-    { id: "meli_general_keyword_search", name: "Mercado Libre General Keyword Search", provider: "Mercado Libre Official API", status: "UNAVAILABLE", dataType: "UNAVAILABLE", purpose: "No se usa: /sites/MLM/search?q=keyword responde HTTP 403 para esta integración" },
-    { id: "supplier_discovery", name: "Supplier Discovery", provider: "Brave Search API", status: process.env.BRAVE_SEARCH_API_KEY ? "READY" : "API_KEY_REQUIRED", dataType: process.env.BRAVE_SEARCH_API_KEY ? "REAL_LEADS" : "MANUAL", purpose: "Buscar proveedores, mayoristas, fabricantes y señales de costo de compra" },
+    { id: "commercial_calendar", name: "Calendario comercial", provider: "MarketOps", status: "READY", dataType: "CONFIGURED", purpose: "Anticipar ventanas comerciales de los próximos 30/60/90/120 días" },
+    { id: "meli_trends", name: "Tendencias de Mercado Libre", provider: "API oficial de Mercado Libre", status: account ? "READY" : "AUTH_REQUIRED", dataType: "REAL", purpose: "Validar señales de demanda y descubrir oportunidades adicionales" },
+    { id: "meli_catalog_products", name: "Investigación de catálogo de Mercado Libre", provider: "API oficial de Mercado Libre", status: account ? "READY" : "AUTH_REQUIRED", dataType: "REAL", purpose: "Convertir hipótesis en productos concretos y validar precio/competencia" },
+    { id: "meli_listing_prices", name: "Comisiones de Mercado Libre", provider: "API oficial de Mercado Libre", status: account ? "READY" : "AUTH_REQUIRED", dataType: "REAL", purpose: "Calcular comisión de venta disponible para precio y categoría" },
+    { id: "meli_general_keyword_search", name: "Búsqueda general de Mercado Libre", provider: "API oficial de Mercado Libre", status: "UNAVAILABLE", dataType: "UNAVAILABLE", purpose: "No se usa: /sites/MLM/search?q=keyword responde HTTP 403 para esta integración" },
+    { id: "supplier_discovery", name: "Cotización de proveedor", provider: "Captura manual verificada", status: "READY", dataType: "MANUAL_VERIFIED", purpose: "Registrar proveedor, costo, compra mínima, envío y tiempo de entrega sin consumir APIs externas" },
   ], marketplaceAccount: account || null });
 }
 
