@@ -14,26 +14,23 @@ function commercialPriority(candidate: RadarCandidate) {
   const opportunity = evidence.commercialOpportunity || null;
   const stage = opportunity?.stage || null;
 
-  if (stage === "BUY_NOW") return 1;
-  if (stage === "SOURCE_NOW") return 2;
+  if (stage === "SOURCE_NOW") return 1;
+  if (stage === "BUY_NOW") return 2;
   if (stage === "RESEARCH_NOW") return 3;
   if (stage === "SELL_NOW") return 4;
-  if (!opportunity || evidence.sourceStrategy === "EVERGREEN") return 5;
-  if (stage === "UPCOMING") return 6;
+  if (stage === "UPCOMING") return 5;
+  if (!opportunity || evidence.sourceStrategy === "EVERGREEN") return 6;
   if (stage === "TOO_LATE") return 9;
   return 7;
 }
 
-function daysToAction(candidate: RadarCandidate) {
+function daysToCommercialEvent(candidate: RadarCandidate) {
   const evidence: any = candidate.Evidence || {};
   const opportunity = evidence.commercialOpportunity || null;
   if (!opportunity) return Number.MAX_SAFE_INTEGER;
 
-  const daysUntilDemand = Number(opportunity.daysUntilDemand);
   const daysUntilPeak = Number(opportunity.daysUntilPeak);
-
-  if (Number.isFinite(daysUntilDemand) && daysUntilDemand >= 0) return daysUntilDemand;
-  if (Number.isFinite(daysUntilPeak) && daysUntilPeak >= 0) return daysUntilPeak;
+  if (Number.isFinite(daysUntilPeak)) return daysUntilPeak >= 0 ? daysUntilPeak : Number.MAX_SAFE_INTEGER - 2;
   return Number.MAX_SAFE_INTEGER - 1;
 }
 
@@ -46,11 +43,27 @@ function evidencePriority(candidate: RadarCandidate) {
 }
 
 function compareCandidates(a: RadarCandidate, b: RadarCandidate) {
+  const aEvidence: any = a.Evidence || {};
+  const bEvidence: any = b.Evidence || {};
+  const aOpportunity = aEvidence.commercialOpportunity || null;
+  const bOpportunity = bEvidence.commercialOpportunity || null;
+  const aTooLate = aOpportunity?.stage === "TOO_LATE";
+  const bTooLate = bOpportunity?.stage === "TOO_LATE";
+
+  if (aTooLate !== bTooLate) return aTooLate ? 1 : -1;
+
+  // Season-first: upcoming commercial events are shown chronologically so the
+  // nearest opportunity is never hidden below a later season just because both
+  // happen to be in different workflow stages.
+  if (aOpportunity && bOpportunity && !aTooLate && !bTooLate) {
+    const eventDifference = daysToCommercialEvent(a) - daysToCommercialEvent(b);
+    if (eventDifference !== 0) return eventDifference;
+  } else if (aOpportunity !== bOpportunity) {
+    return aOpportunity ? -1 : 1;
+  }
+
   const priorityDifference = commercialPriority(a) - commercialPriority(b);
   if (priorityDifference !== 0) return priorityDifference;
-
-  const actionDifference = daysToAction(a) - daysToAction(b);
-  if (actionDifference !== 0) return actionDifference;
 
   const aPrice = Number(a.EstimatedSalePrice || 0) > 0 ? 1 : 0;
   const bPrice = Number(b.EstimatedSalePrice || 0) > 0 ? 1 : 0;
