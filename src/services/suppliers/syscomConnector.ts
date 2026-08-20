@@ -1,14 +1,7 @@
-type SyscomTokenResponse = { token_type: string; expires_in: number; access_token: string };
+import type { SupplierConnector, SupplierProductSearchResult } from "./supplierConnector";
 
-type SyscomProductSearchResponse = {
-  productos?: any[];
-  products?: any[];
-  pagina?: number;
-  paginas?: number;
-  total?: number;
-  cantidad?: number;
-  [key: string]: any;
-};
+type SyscomTokenResponse = { token_type: string; expires_in: number; access_token: string };
+type SyscomProductSearchResponse = { productos?: any[]; products?: any[]; pagina?: number; paginas?: number; total?: number; cantidad?: number; [key: string]: any };
 
 const BASE_URL = "https://developers.syscom.mx/api/v1";
 let tokenCache: { token: string; expiresAt: number } | null = null;
@@ -22,16 +15,10 @@ function getCredentials() {
 async function getAccessToken() {
   const { clientId, clientSecret, configured } = getCredentials();
   if (!configured) throw new Error("SYSCOM_NOT_CONFIGURED");
-
   if (tokenCache && tokenCache.expiresAt > Date.now() + 60_000) return tokenCache.token;
 
   const body = new URLSearchParams({ grant_type: "client_credentials", client_id: clientId, client_secret: clientSecret });
-  const response = await fetch(`${BASE_URL}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-
+  const response = await fetch(`${BASE_URL}/oauth/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
   const data = await response.json().catch(() => ({})) as Partial<SyscomTokenResponse> & Record<string, any>;
   if (!response.ok || !data.access_token) throw new Error(`SYSCOM_AUTH_FAILED:${response.status}:${data.message || data.error || "unknown"}`);
 
@@ -70,21 +57,14 @@ export function getSyscomStatus() {
   const credentials = getCredentials();
   return {
     provider: "SYSCOM",
+    name: "SYSCOM",
     configured: credentials.configured,
-    capabilities: {
-      catalog: true,
-      prices: true,
-      stock: true,
-      orderQuote: true,
-      orderCreate: true,
-      shippingGuide: true,
-      tracking: true,
-    },
-    mode: credentials.configured ? "API" : "CONFIGURATION_REQUIRED",
+    capabilities: { catalog: true, prices: true, stock: true, dropshipping: false, orderQuote: true, orderCreate: true, shippingGuide: true, tracking: true },
+    mode: credentials.configured ? "API" as const : "CONFIGURATION_REQUIRED" as const,
   };
 }
 
-export async function searchSyscomProducts(options: { query?: string; page?: number; limit?: number; stockOnly?: boolean }) {
+export async function searchSyscomProducts(options: { query?: string; page?: number; limit?: number; stockOnly?: boolean }): Promise<SupplierProductSearchResult> {
   const query = String(options.query || "").trim();
   const page = Math.max(1, Math.min(1000, Number(options.page || 1)));
   const limit = Math.max(10, Math.min(100, Number(options.limit || 30)));
@@ -95,13 +75,11 @@ export async function searchSyscomProducts(options: { query?: string; page?: num
 
   const data = await authorizedGet(`/productos?${params.toString()}`) as SyscomProductSearchResponse;
   const products = Array.isArray(data.productos) ? data.productos : Array.isArray(data.products) ? data.products : Array.isArray(data) ? data : [];
-
-  return {
-    provider: "SYSCOM",
-    query,
-    page,
-    limit,
-    total: Number(data.total ?? data.cantidad ?? products.length),
-    products: products.map(normalizeProduct),
-  };
+  return { provider: "SYSCOM", query, page, limit, total: Number(data.total ?? data.cantidad ?? products.length), products: products.map(normalizeProduct) };
 }
+
+export const syscomConnector: SupplierConnector = {
+  id: "SYSCOM",
+  getStatus: getSyscomStatus,
+  searchProducts: searchSyscomProducts,
+};
