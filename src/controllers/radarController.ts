@@ -9,6 +9,42 @@ import { researchCandidateDeep } from "../services/candidateDeepResearchService"
 import { buildInvestmentRecommendation } from "../services/investmentEngine";
 import { calculateMarketScore, getCandidateStatus } from "../services/marketRadarService";
 
+function commercialPriority(candidate: RadarCandidate) {
+  const evidence: any = candidate.Evidence || {};
+  const opportunity = evidence.commercialOpportunity || null;
+  const stage = opportunity?.stage || null;
+
+  if (stage === "BUY_NOW") return 1;
+  if (stage === "SOURCE_NOW") return 2;
+  if (stage === "RESEARCH_NOW") return 3;
+  if (stage === "SELL_NOW") return 4;
+  if (!opportunity || evidence.sourceStrategy === "EVERGREEN") return 5;
+  if (stage === "UPCOMING") return 6;
+  if (stage === "TOO_LATE") return 9;
+  return 7;
+}
+
+function daysToAction(candidate: RadarCandidate) {
+  const evidence: any = candidate.Evidence || {};
+  const opportunity = evidence.commercialOpportunity || null;
+  if (!opportunity) return Number.MAX_SAFE_INTEGER;
+
+  const daysUntilDemand = Number(opportunity.daysUntilDemand);
+  const daysUntilPeak = Number(opportunity.daysUntilPeak);
+
+  if (Number.isFinite(daysUntilDemand) && daysUntilDemand >= 0) return daysUntilDemand;
+  if (Number.isFinite(daysUntilPeak) && daysUntilPeak >= 0) return daysUntilPeak;
+  return Number.MAX_SAFE_INTEGER - 1;
+}
+
+function evidencePriority(candidate: RadarCandidate) {
+  const evidence: any = candidate.Evidence || {};
+  const samples = Number(evidence.priceRange?.samples || 0);
+  const confidence = Number(candidate.ConfidenceScore || evidence.scoring?.DataConfidence || 0);
+  const marketScore = Number(candidate.MarketScore || 0);
+  return samples * 10000 + confidence * 100 + marketScore;
+}
+
 export async function discoverCandidate(req: Request, res: Response) {
   const d = req.body;
   if (!d.title || d.estimatedSalePrice == null) return res.status(400).json({ error: "title and estimatedSalePrice are required" });
@@ -19,12 +55,24 @@ export async function discoverCandidate(req: Request, res: Response) {
 
 export async function getRadarCandidates(_req: Request, res: Response) {
   const rows = await RadarCandidate.findAll({ where: { Status: { [Op.notIn]: ["ARCHIVED", "REJECTED", "RESEARCH_REQUIRED"] } }, limit: 100 });
+
   rows.sort((a, b) => {
+    const priorityDifference = commercialPriority(a) - commercialPriority(b);
+    if (priorityDifference !== 0) return priorityDifference;
+
+    const actionDifference = daysToAction(a) - daysToAction(b);
+    if (actionDifference !== 0) return actionDifference;
+
     const aPrice = Number(a.EstimatedSalePrice || 0) > 0 ? 1 : 0;
     const bPrice = Number(b.EstimatedSalePrice || 0) > 0 ? 1 : 0;
     if (aPrice !== bPrice) return bPrice - aPrice;
-    return Number((b.Evidence as any)?.scoring?.InvestmentScore || b.MarketScore || 0) - Number((a.Evidence as any)?.scoring?.InvestmentScore || a.MarketScore || 0) || Number(b.ConfidenceScore || 0) - Number(a.ConfidenceScore || 0);
+
+    const evidenceDifference = evidencePriority(b) - evidencePriority(a);
+    if (evidenceDifference !== 0) return evidenceDifference;
+
+    return Number((b.Evidence as any)?.scoring?.InvestmentScore || b.MarketScore || 0) - Number((a.Evidence as any)?.scoring?.InvestmentScore || a.MarketScore || 0);
   });
+
   res.json(rows.slice(0, 30));
 }
 
