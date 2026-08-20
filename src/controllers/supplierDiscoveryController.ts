@@ -1,27 +1,21 @@
 import type { Request, Response } from "express";
 import SupplierLead from "../models/SupplierLead";
 import SupplierOffer from "../models/SupplierOffer";
-import { discoverSupplierLeads } from "../services/supplierAutoDiscoveryService";
 
 export async function getSupplierDiscoveryStatus(_req: Request, res: Response) {
   res.json({
-    provider: "BRAVE_SEARCH",
-    configured: Boolean(process.env.BRAVE_SEARCH_API_KEY),
-    mode: process.env.BRAVE_SEARCH_API_KEY ? "AUTOMATIC" : "MANUAL_FALLBACK",
-    note: "Search results are supplier leads, not confirmed quotations.",
+    provider: "MANUAL_VERIFIED",
+    configured: true,
+    mode: "MANUAL",
+    note: "La búsqueda automática con Brave está deshabilitada. MarketOps usa únicamente cotizaciones de proveedor capturadas y verificadas por el usuario.",
   });
 }
 
-export async function runSupplierDiscovery(req: Request, res: Response) {
-  try {
-    const productQuery = String(req.body?.productQuery || "").trim();
-    if (!productQuery) return res.status(400).json({ error: "productQuery is required" });
-
-    const result = await discoverSupplierLeads(productQuery);
-    return res.status(201).json(result);
-  } catch (error: any) {
-    return res.status(400).json({ error: error?.message || "Unable to discover suppliers" });
-  }
+export async function runSupplierDiscovery(_req: Request, res: Response) {
+  return res.status(410).json({
+    error: "La búsqueda automática de proveedores está deshabilitada.",
+    mode: "MANUAL_VERIFIED",
+  });
 }
 
 export async function getSupplierLeads(req: Request, res: Response) {
@@ -53,19 +47,10 @@ export async function convertLeadToOffer(req: Request, res: Response) {
   const lead = await SupplierLead.findByPk(Number(req.params.leadId));
   if (!lead) return res.status(404).json({ error: "Supplier lead not found" });
 
-  const {
-    unitPrice,
-    moq = 1,
-    shippingCost = 0,
-    importCost = 0,
-    deliveryDays,
-    reliabilityScore,
-  } = req.body;
+  const { unitPrice, moq = 1, shippingCost = 0, importCost = 0, deliveryDays, reliabilityScore } = req.body;
 
   if (unitPrice == null) {
-    return res.status(400).json({
-      error: "unitPrice is required. A discovered lead cannot become a quote without a verified price.",
-    });
+    return res.status(400).json({ error: "unitPrice is required. A discovered lead cannot become a quote without a verified price." });
   }
 
   const offer = await SupplierOffer.create({
@@ -81,10 +66,6 @@ export async function convertLeadToOffer(req: Request, res: Response) {
     ReliabilityScore: Number(reliabilityScore ?? lead.LeadScore),
   });
 
-  await lead.update({
-    VerificationStatus: "QUOTED",
-    Notes: `Converted to SupplierOffer #${offer.ID_SupplierOffer}`,
-  });
-
+  await lead.update({ VerificationStatus: "QUOTED", Notes: `Converted to SupplierOffer #${offer.ID_SupplierOffer}` });
   return res.status(201).json(offer);
 }
