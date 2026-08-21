@@ -14,6 +14,7 @@ import Season from "../models/Season";
 import Stock from "../models/Stock";
 import Supplier from "../models/Supplier";
 import SupplierOffer from "../models/SupplierOffer";
+import SupplierProduct from "../models/SupplierProduct";
 import MarketSnapshot from "../models/MarketSnapshot";
 import DiscoveryRun from "../models/DiscoveryRun";
 import SupplierLead from "../models/SupplierLead";
@@ -32,5 +33,5 @@ export const sequelize = new Sequelize({
   username: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   logging: process.env.DB_LOGGING === "true" ? console.log : false,
-  models: [CapitalAccount, CapitalMovement, InventoryMovement, MarketplaceAccount, MarketplaceListing, Opportunity, Product, Purchase, PurchaseItem, Sale, SaleItem, Season, Stock, Supplier, SupplierOffer, RadarCandidate, InvestmentRecommendation, MarketSnapshot, DiscoveryRun, SupplierLead, SupplierDiscoveryRun, PortfolioRecommendation, ReplenishmentDecision, LearningOutcome],
+  models: [CapitalAccount, CapitalMovement, InventoryMovement, MarketplaceAccount, MarketplaceListing, Opportunity, Product, Purchase, PurchaseItem, Sale, SaleItem, Season, Stock, Supplier, SupplierOffer, SupplierProduct, RadarCandidate, InvestmentRecommendation, MarketSnapshot, DiscoveryRun, SupplierLead, SupplierDiscoveryRun, PortfolioRecommendation, ReplenishmentDecision, LearningOutcome],
 });
