@@ -1,7 +1,8 @@
 import type { SupplierConnector } from "./supplierConnector";
+import { eleGateConnector } from "./eleGateConnector";
 import { syscomConnector } from "./syscomConnector";
 
-const connectors: SupplierConnector[] = [syscomConnector];
+const connectors: SupplierConnector[] = [eleGateConnector, syscomConnector];
 
 export function listSupplierConnectors() {
   return connectors;
